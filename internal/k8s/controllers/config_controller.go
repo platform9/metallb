@@ -34,7 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 const bgpExtrasConfigName = "bgpextras"
@@ -59,12 +58,6 @@ var requestHandler = func(r *ConfigReconciler, ctx context.Context, req ctrl.Req
 	level.Info(r.Logger).Log("controller", "ConfigReconciler", "start reconcile", req.NamespacedName.String())
 	defer level.Info(r.Logger).Log("controller", "ConfigReconciler", "end reconcile", req.NamespacedName.String())
 	updates.Inc()
-
-	var addressPools metallbv1beta1.AddressPoolList
-	if err := r.List(ctx, &addressPools, client.InNamespace(r.Namespace)); err != nil {
-		level.Error(r.Logger).Log("controller", "ConfigReconciler", "message", "failed to get addresspools", "error", err)
-		return ctrl.Result{}, err
-	}
 
 	var ipAddressPools metallbv1beta1.IPAddressPoolList
 	if err := r.List(ctx, &ipAddressPools, client.InNamespace(r.Namespace)); err != nil {
@@ -127,22 +120,21 @@ var requestHandler = func(r *ConfigReconciler, ctx context.Context, req ctrl.Req
 	}
 
 	resources := config.ClusterResources{
-		Pools:              ipAddressPools.Items,
-		Peers:              bgpPeers.Items,
-		BFDProfiles:        bfdProfiles.Items,
-		L2Advs:             l2Advertisements.Items,
-		BGPAdvs:            bgpAdvertisements.Items,
-		LegacyAddressPools: addressPools.Items,
-		Communities:        communities.Items,
-		PasswordSecrets:    secrets,
-		Nodes:              nodes.Items,
-		Namespaces:         namespaces.Items,
-		BGPExtras:          extrasMap,
+		Pools:           ipAddressPools.Items,
+		Peers:           bgpPeers.Items,
+		BFDProfiles:     bfdProfiles.Items,
+		L2Advs:          l2Advertisements.Items,
+		BGPAdvs:         bgpAdvertisements.Items,
+		Communities:     communities.Items,
+		PasswordSecrets: secrets,
+		Nodes:           nodes.Items,
+		Namespaces:      namespaces.Items,
+		BGPExtras:       extrasMap,
 	}
 
 	level.Debug(r.Logger).Log("controller", "ConfigReconciler", "metallb CRs and Secrets", dumpClusterResources(&resources))
 
-	cfg, err := config.For(resources, r.ValidateConfig)
+	cfg, err := toConfig(resources, r.ValidateConfig)
 	if err != nil {
 		configStale.Set(1)
 		level.Error(r.Logger).Log("controller", "ConfigReconciler", "error", "failed to parse the configuration", "error", err)
@@ -195,16 +187,15 @@ func (r *ConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&metallbv1beta2.BGPPeer{}).
-		Watches(&source.Kind{Type: &metallbv1beta1.IPAddressPool{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &corev1.Node{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &metallbv1beta1.BGPAdvertisement{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &metallbv1beta1.L2Advertisement{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &metallbv1beta1.BFDProfile{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &metallbv1beta1.AddressPool{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &metallbv1beta1.Community{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &corev1.Secret{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &corev1.Namespace{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &corev1.ConfigMap{}}, &handler.EnqueueRequestForObject{}).
+		Watches(&metallbv1beta1.IPAddressPool{}, &handler.EnqueueRequestForObject{}).
+		Watches(&corev1.Node{}, &handler.EnqueueRequestForObject{}).
+		Watches(&metallbv1beta1.BGPAdvertisement{}, &handler.EnqueueRequestForObject{}).
+		Watches(&metallbv1beta1.L2Advertisement{}, &handler.EnqueueRequestForObject{}).
+		Watches(&metallbv1beta1.BFDProfile{}, &handler.EnqueueRequestForObject{}).
+		Watches(&metallbv1beta1.Community{}, &handler.EnqueueRequestForObject{}).
+		Watches(&corev1.Secret{}, &handler.EnqueueRequestForObject{}).
+		Watches(&corev1.Namespace{}, &handler.EnqueueRequestForObject{}).
+		Watches(&corev1.ConfigMap{}, &handler.EnqueueRequestForObject{}).
 		WithEventFilter(p).
 		Complete(r)
 }
