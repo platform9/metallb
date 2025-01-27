@@ -9,6 +9,7 @@ import (
 	"go.universe.tf/metallb/api/v1beta1"
 	"go.universe.tf/metallb/api/v1beta2"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestValidate(t *testing.T) {
@@ -70,12 +71,192 @@ func TestValidate(t *testing.T) {
 			mustFail: true,
 		},
 		{
+			desc: "v6 address but pool not selected",
+			config: ClusterResources{
+				Pools: []v1beta1.IPAddressPool{
+					{
+						ObjectMeta: v1.ObjectMeta{
+							Name: "foo",
+						},
+						Spec: v1beta1.IPAddressPoolSpec{
+							Addresses: []string{"2001:db8::/64"},
+						},
+					},
+				},
+				BGPAdvs: []v1beta1.BGPAdvertisement{
+					{
+						ObjectMeta: v1.ObjectMeta{
+							Name: "foo",
+						},
+						Spec: v1beta1.BGPAdvertisementSpec{
+							IPAddressPools: []string{"bar"},
+						},
+					},
+				},
+			},
+		},
+		{
+			desc: "v6 address and selected",
+			config: ClusterResources{
+				Pools: []v1beta1.IPAddressPool{
+					{
+						ObjectMeta: v1.ObjectMeta{
+							Name: "foo",
+						},
+						Spec: v1beta1.IPAddressPoolSpec{
+							Addresses: []string{"2001:db8::/64"},
+						},
+					},
+				},
+				BGPAdvs: []v1beta1.BGPAdvertisement{
+					{
+						ObjectMeta: v1.ObjectMeta{
+							Name: "bar",
+						},
+						Spec: v1beta1.BGPAdvertisementSpec{
+							IPAddressPools: []string{"foo1"},
+						},
+					},
+					{
+						ObjectMeta: v1.ObjectMeta{
+							Name: "bar",
+						},
+						Spec: v1beta1.BGPAdvertisementSpec{
+							IPAddressPools: []string{"foo"},
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
+			desc: "v6 address and selected by labels",
+			config: ClusterResources{
+				Pools: []v1beta1.IPAddressPool{
+					{
+						ObjectMeta: v1.ObjectMeta{
+							Name:   "foo",
+							Labels: map[string]string{"key": "value"},
+						},
+						Spec: v1beta1.IPAddressPoolSpec{
+							Addresses: []string{"2001:db8::/64"},
+						},
+					},
+				},
+				BGPAdvs: []v1beta1.BGPAdvertisement{
+					{
+						ObjectMeta: v1.ObjectMeta{
+							Name: "bar",
+						},
+						Spec: v1beta1.BGPAdvertisementSpec{
+							IPAddressPools: []string{"foo1"},
+						},
+					},
+					{
+						ObjectMeta: v1.ObjectMeta{
+							Name: "bar",
+						},
+						Spec: v1beta1.BGPAdvertisementSpec{
+							IPAddressPoolSelectors: []v1.LabelSelector{
+								{
+									MatchLabels: map[string]string{"key": "value"},
+								},
+							},
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
+			desc: "enable BGP GracefulRestart",
+			config: ClusterResources{
+				Peers: []v1beta2.BGPPeer{
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							EnableGracefulRestart: true,
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
+			desc: "disable BGP MP",
+			config: ClusterResources{
+				Peers: []v1beta2.BGPPeer{
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							DisableMP: true,
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
+			desc: "dynamic ASN",
+			config: ClusterResources{
+				Peers: []v1beta2.BGPPeer{
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							DynamicASN: "internal",
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
 			desc: "keepalive time",
 			config: ClusterResources{
 				Peers: []v1beta2.BGPPeer{
 					{
 						Spec: v1beta2.BGPPeerSpec{
-							KeepaliveTime: v1.Duration{Duration: time.Second},
+							KeepaliveTime: &v1.Duration{Duration: time.Second},
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
+			desc: "connect time",
+			config: ClusterResources{
+				Peers: []v1beta2.BGPPeer{
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							ConnectTime: ptr.To(v1.Duration{Duration: time.Second}),
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
+			desc: "large BGP community inside BGP Advertisement",
+			config: ClusterResources{
+				BGPAdvs: []v1beta1.BGPAdvertisement{
+					{
+						Spec: v1beta1.BGPAdvertisementSpec{
+							Communities: []string{"large:123:456:789"},
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
+			desc: "large BGP community inside Community CR",
+			config: ClusterResources{
+				Communities: []v1beta1.Community{
+					{
+						Spec: v1beta1.CommunitySpec{
+							Communities: []v1beta1.CommunityAlias{
+								{
+									Value: "large:123:456:789",
+								},
+							},
 						},
 					},
 				},

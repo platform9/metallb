@@ -24,12 +24,13 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/google/go-cmp/cmp"
-	"go.universe.tf/metallb/internal/k8s/epslices"
-	"go.universe.tf/metallb/internal/pointer"
+
 	corev1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -41,12 +42,6 @@ func TestServiceController(t *testing.T) {
 		contextTimeOutDuration = time.Millisecond * 100
 		testObjectName         = "testObject"
 		testService            = &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      testObjectName,
-				Namespace: testNamespace,
-			},
-		}
-		testEndPoint = &corev1.Endpoints{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      testObjectName,
 				Namespace: testNamespace,
@@ -65,119 +60,132 @@ func TestServiceController(t *testing.T) {
 	tests := []struct {
 		desc                    string
 		handlerRes              SyncState
-		needEndPoints           NeedEndPoints
+		needEndPoints           bool
 		initObjects             []client.Object
 		shouldReprocessAll      bool
 		expectReconcileFails    bool
 		expectForceReloadCalled bool
+		initialLoadPerformed    bool
 	}{
 		{
 			desc:                    "call reconcileService, handler returns SyncStateSuccess",
 			handlerRes:              SyncStateSuccess,
-			needEndPoints:           NoNeed,
+			needEndPoints:           false,
 			initObjects:             []client.Object{testService},
 			shouldReprocessAll:      false,
 			expectReconcileFails:    false,
 			expectForceReloadCalled: false,
+			initialLoadPerformed:    true,
 		},
 		{
-			desc:                    "call reconcileService, handler returns SyncStateSuccess - with endpoints",
+			desc:                    "call reconcileService, handler returns SyncStateSuccess",
 			handlerRes:              SyncStateSuccess,
-			needEndPoints:           Endpoints,
-			initObjects:             []client.Object{testService, testEndPoint},
-			shouldReprocessAll:      false,
-			expectReconcileFails:    false,
-			expectForceReloadCalled: false,
-		},
-		{
-			desc:                    "call reconcileService, handler returns SyncStateSuccess - with endpointSlices",
-			handlerRes:              SyncStateSuccess,
-			needEndPoints:           EndpointSlices,
+			needEndPoints:           true,
 			initObjects:             []client.Object{testService, testEndPointSlices},
 			shouldReprocessAll:      false,
 			expectReconcileFails:    false,
 			expectForceReloadCalled: false,
+			initialLoadPerformed:    true,
 		},
 		{
 			desc:                    "call reconcileService, handler returns SyncStateError",
 			handlerRes:              SyncStateError,
-			needEndPoints:           NoNeed,
+			needEndPoints:           false,
 			initObjects:             []client.Object{testService},
 			shouldReprocessAll:      false,
 			expectReconcileFails:    true,
 			expectForceReloadCalled: false,
+			initialLoadPerformed:    true,
 		},
 		{
 			desc:                    "call reconcileService, handler returns SyncStateErrorNoRetry",
 			handlerRes:              SyncStateErrorNoRetry,
-			needEndPoints:           NoNeed,
+			needEndPoints:           false,
 			initObjects:             []client.Object{testService},
 			shouldReprocessAll:      false,
 			expectReconcileFails:    false,
 			expectForceReloadCalled: false,
+			initialLoadPerformed:    true,
 		},
 		{
 			desc:                    "call reconcileService, handler returns SyncStateReprocessAll",
 			handlerRes:              SyncStateReprocessAll,
-			needEndPoints:           NoNeed,
+			needEndPoints:           false,
 			initObjects:             []client.Object{testService},
 			shouldReprocessAll:      false,
 			expectReconcileFails:    false,
 			expectForceReloadCalled: true,
+			initialLoadPerformed:    true,
+		},
+		{
+			desc:                    "call reconcileService, initialLoadPerformed initiated to false",
+			handlerRes:              SyncStateReprocessAll,
+			needEndPoints:           false,
+			initObjects:             []client.Object{testService},
+			shouldReprocessAll:      false,
+			expectReconcileFails:    false,
+			expectForceReloadCalled: false,
+			initialLoadPerformed:    false,
 		},
 		{
 			desc:                    "call reprocessAll, handler returns SyncStateSuccess",
 			handlerRes:              SyncStateSuccess,
-			needEndPoints:           NoNeed,
+			needEndPoints:           false,
 			initObjects:             []client.Object{testService},
 			shouldReprocessAll:      true,
 			expectReconcileFails:    false,
 			expectForceReloadCalled: false,
+			initialLoadPerformed:    true,
 		},
 		{
-			desc:                    "call reprocessAll, handler returns SyncStateSuccess - with endpoints",
+			desc:                    "call reprocessAll, handler returns SyncStateSuccess",
 			handlerRes:              SyncStateSuccess,
-			needEndPoints:           Endpoints,
-			initObjects:             []client.Object{testService, testEndPoint},
-			shouldReprocessAll:      true,
-			expectReconcileFails:    false,
-			expectForceReloadCalled: false,
-		},
-		{
-			desc:                    "call reprocessAll, handler returns SyncStateSuccess - with endpointSlices",
-			handlerRes:              SyncStateSuccess,
-			needEndPoints:           EndpointSlices,
+			needEndPoints:           true,
 			initObjects:             []client.Object{testService, testEndPointSlices},
 			shouldReprocessAll:      true,
 			expectReconcileFails:    false,
 			expectForceReloadCalled: false,
+			initialLoadPerformed:    true,
 		},
 		{
 			desc:                    "call reprocessAll, handler returns SyncStateError",
 			handlerRes:              SyncStateError,
-			needEndPoints:           NoNeed,
+			needEndPoints:           false,
 			initObjects:             []client.Object{testService},
 			shouldReprocessAll:      true,
 			expectReconcileFails:    true,
 			expectForceReloadCalled: false,
+			initialLoadPerformed:    true,
 		},
 		{
 			desc:                    "call reprocessAll, handler returns SyncStateErrorNoRetry",
 			handlerRes:              SyncStateErrorNoRetry,
-			needEndPoints:           NoNeed,
+			needEndPoints:           false,
 			initObjects:             []client.Object{testService},
 			shouldReprocessAll:      true,
 			expectReconcileFails:    false,
 			expectForceReloadCalled: false,
+			initialLoadPerformed:    true,
 		},
 		{
 			desc:                    "call reprocessAll, handler returns SyncStateReprocessAll",
 			handlerRes:              SyncStateReprocessAll,
-			needEndPoints:           NoNeed,
+			needEndPoints:           false,
 			initObjects:             []client.Object{testService},
 			shouldReprocessAll:      true,
 			expectReconcileFails:    true,
 			expectForceReloadCalled: false,
+			initialLoadPerformed:    true,
+		},
+		{
+			desc:                    "call reprocessAll, initialLoadPerformed initiated to false",
+			handlerRes:              SyncStateSuccess,
+			needEndPoints:           false,
+			initObjects:             []client.Object{testService},
+			shouldReprocessAll:      true,
+			expectReconcileFails:    false,
+			expectForceReloadCalled: false,
+			initialLoadPerformed:    false,
 		},
 	}
 	for _, test := range tests {
@@ -186,20 +194,15 @@ func TestServiceController(t *testing.T) {
 			t.Fatalf("test %s failed to create fake client: %v", test.desc, err)
 		}
 
-		mockHandler := func(l log.Logger, serviceName string, s *corev1.Service, e epslices.EpsOrSlices) SyncState {
+		mockHandler := func(l log.Logger, serviceName string, s *corev1.Service, eps []discovery.EndpointSlice) SyncState {
 			if !reflect.DeepEqual(testService.ObjectMeta, s.ObjectMeta) {
 				t.Errorf("test %s failed, handler called with the wrong service (-want +got)\n%s",
 					test.desc, cmp.Diff(testService.ObjectMeta, s.ObjectMeta))
 			}
-			if test.needEndPoints == Endpoints &&
-				!reflect.DeepEqual(testEndPoint.ObjectMeta, e.EpVal.ObjectMeta) {
-				t.Errorf("test %s failed, handler called with the wrong endpoints (-want +got)\n%s",
-					test.desc, cmp.Diff(testEndPoint.ObjectMeta, e.EpVal.ObjectMeta))
-			}
-			if test.needEndPoints == EndpointSlices &&
-				!reflect.DeepEqual(testEndPointSlices.ObjectMeta, e.SlicesVal[0].ObjectMeta) {
+			if test.needEndPoints &&
+				!reflect.DeepEqual(testEndPointSlices.ObjectMeta, eps[0].ObjectMeta) {
 				t.Errorf("test %s failed, handler called with the wrong endpointslices (-want +got)\n%s",
-					test.desc, cmp.Diff(testEndPointSlices.ObjectMeta, e.SlicesVal[0].ObjectMeta))
+					test.desc, cmp.Diff(testEndPointSlices.ObjectMeta, eps[0].ObjectMeta))
 			}
 			return test.handlerRes
 		}
@@ -207,15 +210,16 @@ func TestServiceController(t *testing.T) {
 		mockReload := make(chan event.GenericEvent, 1)
 
 		r := &ServiceReconciler{
-			Client:    fakeClient,
-			Logger:    log.NewNopLogger(),
-			Scheme:    scheme,
-			Namespace: testNamespace,
-			Handler:   mockHandler,
-			Endpoints: test.needEndPoints,
-			Reload:    mockReload,
+			Client:               fakeClient,
+			Logger:               log.NewNopLogger(),
+			Scheme:               scheme.Scheme,
+			Namespace:            testNamespace,
+			Handler:              mockHandler,
+			Endpoints:            test.needEndPoints,
+			Reload:               mockReload,
+			initialLoadPerformed: false,
 		}
-
+		r.initialLoadPerformed = test.initialLoadPerformed
 		var req reconcile.Request
 		if test.shouldReprocessAll {
 			req = reconcile.Request{
@@ -254,6 +258,9 @@ func TestServiceController(t *testing.T) {
 			t.Errorf("test %s failed: call force reload expected: %v, got: %v",
 				test.desc, test.expectForceReloadCalled, calledForceReload)
 		}
+		if test.shouldReprocessAll && !r.initialLoadPerformed {
+			t.Errorf("test %s failed: reconciler's initialLoadPerformed flag didn't change to true", test.desc)
+		}
 	}
 }
 
@@ -278,19 +285,19 @@ func TestLBClass(t *testing.T) {
 		},
 		{
 			desc:           "Set serviceclass, metallb default",
-			serviceLBClass: pointer.StrPtr("foo"),
+			serviceLBClass: ptr.To[string]("foo"),
 			metallLBClass:  "",
 			shouldFilter:   true,
 		},
 		{
 			desc:           "Set serviceclass, metallb different",
-			serviceLBClass: pointer.StrPtr("foo"),
+			serviceLBClass: ptr.To[string]("foo"),
 			metallLBClass:  "bar",
 			shouldFilter:   true,
 		},
 		{
 			desc:           "Set serviceclass, metallb same",
-			serviceLBClass: pointer.StrPtr("foo"),
+			serviceLBClass: ptr.To[string]("foo"),
 			metallLBClass:  "foo",
 			shouldFilter:   false,
 		},

@@ -15,9 +15,11 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"go.universe.tf/metallb/internal/bgp"
+	"go.universe.tf/metallb/internal/bgp/community"
 	metallbconfig "go.universe.tf/metallb/internal/config"
 	"go.universe.tf/metallb/internal/ipfamily"
 	"go.universe.tf/metallb/internal/logging"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // As the MetalLB controller should handle messages synchronously, there should
@@ -36,7 +38,6 @@ type session struct {
 	bgp.SessionParameters
 	sessionManager *sessionManager
 	advertised     []*bgp.Advertisement
-	logger         log.Logger
 }
 
 // Create a variable for os.Hostname() in order to make it easy to mock out
@@ -116,7 +117,6 @@ func (sm *sessionManager) NewSession(l log.Logger, args bgp.SessionParameters) (
 	sm.Lock()
 	defer sm.Unlock()
 	s := &session{
-		logger:            log.With(l, "peer", args.PeerAddress, "localASN", args.MyASN, "peerASN", args.PeerASN),
 		advertised:        []*bgp.Advertisement{},
 		sessionManager:    sm,
 		SessionParameters: args,
@@ -172,7 +172,7 @@ func (sm *sessionManager) SyncBFDProfiles(profiles map[string]*metallbconfig.BFD
 	defer sm.Unlock()
 	sm.bfdProfiles = make([]BFDProfile, 0)
 	for _, p := range profiles {
-		frrProfile := configBFDProfileToFRR(p)
+		frrProfile := ConfigBFDProfileToFRR(p)
 		sm.bfdProfiles = append(sm.bfdProfiles, *frrProfile)
 	}
 	sort.Slice(sm.bfdProfiles, func(i, j int) bool {
@@ -201,13 +201,26 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 		ExtraConfig: sm.extraConfig,
 	}
 
+	type neighborProperties struct {
+		// It has at least one advertisement with these communities
+		CommunitiesV4 sets.Set[string]
+		CommunitiesV6 sets.Set[string]
+		// It has at least one advertisement with these large communities
+		LargeCommunitiesV4 sets.Set[string]
+		LargeCommunitiesV6 sets.Set[string]
+		// It has at least one advertisement with these local preferences
+		LocalPrefsV4 sets.Set[uint32]
+		LocalPrefsV6 sets.Set[uint32]
+	}
+
 	type router struct {
-		myASN        uint32
-		routerID     string
-		neighbors    map[string]*neighborConfig
-		vrf          string
-		ipV4Prefixes map[string]string
-		ipV6Prefixes map[string]string
+		myASN               uint32
+		routerID            string
+		neighbors           map[string]*neighborConfig
+		neighborsProperties map[string]*neighborProperties
+		vrf                 string
+		ipV4Prefixes        map[string]string
+		ipV6Prefixes        map[string]string
 	}
 
 	routers := make(map[string]*router)
@@ -223,14 +236,15 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 		var exist bool
 		var rout *router
 
-		routerName := routerName(s.RouterID.String(), s.MyASN, s.VRFName)
+		routerName := RouterName(s.RouterID.String(), s.MyASN, s.VRFName)
 		if rout, exist = routers[routerName]; !exist {
 			rout = &router{
-				myASN:        s.MyASN,
-				neighbors:    make(map[string]*neighborConfig),
-				ipV4Prefixes: make(map[string]string),
-				ipV6Prefixes: make(map[string]string),
-				vrf:          s.VRFName,
+				myASN:               s.MyASN,
+				neighbors:           make(map[string]*neighborConfig),
+				neighborsProperties: make(map[string]*neighborProperties),
+				ipV4Prefixes:        make(map[string]string),
+				ipV6Prefixes:        make(map[string]string),
+				vrf:                 s.VRFName,
 			}
 			if s.RouterID != nil {
 				rout.routerID = s.RouterID.String()
@@ -238,7 +252,7 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 			routers[routerName] = rout
 		}
 
-		neighborName := neighborName(s.PeerAddress, s.PeerASN, s.VRFName)
+		neighborName := NeighborName(s.PeerAddress, s.PeerASN, s.DynamicASN, s.VRFName)
 		if neighbor, exist = rout.neighbors[neighborName]; !exist {
 			host, port, err := net.SplitHostPort(s.PeerAddress)
 			if err != nil {
@@ -252,52 +266,101 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 
 			family := ipfamily.ForAddress(net.ParseIP(host))
 
+			var connectTime int64
+			if s.ConnectTime != nil {
+				connectTime = int64(*s.ConnectTime / time.Second)
+			}
+
+			var holdTime *int64
+			var keepaliveTime *int64
+			if s.HoldTime != nil {
+				time := int64(*s.HoldTime / time.Second)
+				holdTime = &time
+			}
+			if s.KeepAliveTime != nil {
+				time := int64(*s.KeepAliveTime / time.Second)
+				keepaliveTime = &time
+			}
+
 			neighbor = &neighborConfig{
-				IPFamily:       family,
-				ASN:            s.PeerASN,
-				Addr:           host,
-				Port:           uint16(portUint),
-				HoldTime:       uint64(s.HoldTime / time.Second),
-				KeepaliveTime:  uint64(s.KeepAliveTime / time.Second),
-				Password:       s.Password,
-				Advertisements: make([]*advertisementConfig, 0),
-				BFDProfile:     s.BFDProfile,
-				EBGPMultiHop:   s.EBGPMultiHop,
-				VRFName:        s.VRFName,
+				Name:            neighborName,
+				IPFamily:        family,
+				ASN:             asnFor(s.PeerASN, s.DynamicASN),
+				Addr:            host,
+				Port:            uint16(portUint),
+				HoldTime:        holdTime,
+				KeepaliveTime:   keepaliveTime,
+				ConnectTime:     connectTime,
+				Password:        s.Password,
+				Advertisements:  make([]*advertisementConfig, 0),
+				BFDProfile:      s.BFDProfile,
+				GracefulRestart: s.GracefulRestart,
+				EBGPMultiHop:    s.EBGPMultiHop,
+				VRFName:         s.VRFName,
+				DisableMP:       s.DisableMP,
 			}
 			if s.SourceAddress != nil {
 				neighbor.SrcAddr = s.SourceAddress.String()
 			}
 			rout.neighbors[neighborName] = neighbor
+			rout.neighborsProperties[neighborName] = &neighborProperties{
+				CommunitiesV4:      sets.New[string](),
+				CommunitiesV6:      sets.New[string](),
+				LargeCommunitiesV4: sets.New[string](),
+				LargeCommunitiesV6: sets.New[string](),
+				LocalPrefsV4:       sets.New[uint32](),
+				LocalPrefsV6:       sets.New[uint32](),
+			}
 		}
 
-		/* As 'session.advertised' is a map, we can be sure there are no
-		   duplicate prefixes and can, therefore, just add them to the
-		   'neighbor.Advertisements' list. */
-		for _, adv := range s.advertised {
-			if !adv.MatchesPeer(s.SessionName) {
-				continue
-			}
+		properties := rout.neighborsProperties[neighborName]
 
+		for _, adv := range s.advertised {
 			family := ipfamily.ForAddress(adv.Prefix.IP)
 
 			communities := make([]string, 0)
+			largeCommunities := make([]string, 0)
 
 			// Convert community 32bits value to : format
 			for _, c := range adv.Communities {
-				community := metallbconfig.CommunityToString(c)
-				communities = append(communities, community)
+				if community.IsLarge(c) {
+					largeCommunities = append(largeCommunities, c.String())
+					if family == ipfamily.IPv4 {
+						properties.LargeCommunitiesV4.Insert(c.String())
+						continue
+					}
+					properties.LargeCommunitiesV6.Insert(c.String())
+					continue
+				}
+				communities = append(communities, c.String())
+				if family == ipfamily.IPv4 {
+					properties.CommunitiesV4.Insert(c.String())
+					continue
+				}
+				properties.CommunitiesV6.Insert(c.String())
 			}
 
 			prefix := adv.Prefix.String()
 			advConfig := advertisementConfig{
-				IPFamily:    family,
-				Prefix:      prefix,
-				Communities: communities,
-				LocalPref:   adv.LocalPref,
+				IPFamily:         family,
+				Prefix:           prefix,
+				Communities:      sort.StringSlice(communities),
+				LargeCommunities: sort.StringSlice(largeCommunities),
+				LocalPref:        adv.LocalPref,
+			}
+			if adv.LocalPref != 0 {
+				if family == ipfamily.IPv4 {
+					properties.LocalPrefsV4.Insert(adv.LocalPref)
+				} else {
+					properties.LocalPrefsV6.Insert(adv.LocalPref)
+				}
 			}
 
-			neighbor.Advertisements = append(neighbor.Advertisements, &advConfig)
+			neighbor.Advertisements, err = addToAdvertisements(neighbor.Advertisements, &advConfig)
+			if err != nil {
+				return nil, err
+			}
+
 			switch family {
 			case ipfamily.IPv4:
 				rout.ipV4Prefixes[prefix] = prefix
@@ -318,10 +381,23 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 			IPV4Prefixes: sortMap(r.ipV4Prefixes),
 			IPV6Prefixes: sortMap(r.ipV6Prefixes),
 		}
+		// Filling in the neighbor properties
+		for _, n := range toAdd.Neighbors {
+			properties := r.neighborsProperties[n.Name]
+			n.CommunitiesV4 = sets.List(properties.CommunitiesV4)
+			n.CommunitiesV6 = sets.List(properties.CommunitiesV6)
+			n.LargeCommunitiesV4 = sets.List(properties.LargeCommunitiesV4)
+			n.LargeCommunitiesV6 = sets.List(properties.LargeCommunitiesV6)
+			n.LocalPrefsV4 = sets.List(properties.LocalPrefsV4)
+			n.LocalPrefsV6 = sets.List(properties.LocalPrefsV6)
+		}
+
 		config.Routers = append(config.Routers, toAdd)
 	}
 	return config, nil
 }
+
+func (sm *sessionManager) SetEventCallback(func(interface{})) {}
 
 var debounceTimeout = 3 * time.Second
 var failureTimeout = time.Second * 5
@@ -408,7 +484,7 @@ func validateReload(l log.Logger, prevReloadTimeStamp *string, reload chan<- rel
 	level.Info(l).Log("op", "reload-validate", "success", "reloaded config")
 }
 
-func configBFDProfileToFRR(p *metallbconfig.BFDProfile) *BFDProfile {
+func ConfigBFDProfileToFRR(p *metallbconfig.BFDProfile) *BFDProfile {
 	res := &BFDProfile{}
 	res.Name = p.Name
 	res.ReceiveInterval = p.ReceiveInterval
@@ -451,4 +527,52 @@ func sortMap[T any](toSort map[string]T) []T {
 		res = append(res, toSort[k])
 	}
 	return res
+}
+
+func addToAdvertisements(current []*advertisementConfig, toAdd *advertisementConfig) ([]*advertisementConfig, error) {
+	i := sort.Search(len(current), func(i int) bool { return current[i].Prefix >= toAdd.Prefix })
+	if i == len(current) {
+		return append(current, toAdd), nil
+	}
+
+	if current[i].Prefix == toAdd.Prefix {
+		var err error
+		current[i], err = mergeAdvertisements(current[i], toAdd)
+		if err != nil {
+			return nil, err
+		}
+		return current, nil
+	}
+	res := make([]*advertisementConfig, len(current)+1)
+	copy(res[:i], current[:i])
+	copy(res[i+1:], current[i:])
+	res[i] = toAdd
+	return res, nil
+}
+
+func mergeAdvertisements(adv1, adv2 *advertisementConfig) (*advertisementConfig, error) {
+	res := &advertisementConfig{}
+	if adv1.Prefix != adv2.Prefix {
+		return nil, fmt.Errorf("cannot merge advertisements with different prefixes: %s != %s", adv1.Prefix, adv2.Prefix)
+	}
+	if adv1.IPFamily != adv2.IPFamily {
+		return nil, fmt.Errorf("cannot merge advertisements with different ipfamilies: %s != %s", adv1.IPFamily, adv2.IPFamily)
+	}
+	if adv1.LocalPref != adv2.LocalPref {
+		return nil, fmt.Errorf("cannot merge advertisements with different local preferences: %d != %d", adv1.LocalPref, adv2.LocalPref)
+	}
+
+	res.Prefix = adv1.Prefix
+	res.IPFamily = adv1.IPFamily
+	res.LocalPref = adv1.LocalPref
+	res.Communities = mergeCommunities(adv1.Communities, adv2.Communities)
+	res.LargeCommunities = mergeCommunities(adv1.LargeCommunities, adv2.LargeCommunities)
+	return res, nil
+}
+
+func mergeCommunities(c1, c2 []string) []string {
+	communities := sets.New[string]()
+	communities.Insert(c1...)
+	communities.Insert(c2...)
+	return sets.List(communities)
 }

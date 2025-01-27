@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -83,6 +84,12 @@ func generate(w io.Writer, origin string) error {
 		return err
 	}
 
+	log.Println("Converting configmap resources to K8S-compliant names")
+	err = convertNamesToK8S(cf)
+	if err != nil {
+		return err
+	}
+
 	log.Println("Creating custom resources")
 	resources, err := resourcesFor(cf)
 	if err != nil {
@@ -147,6 +154,80 @@ func decodeConfigFile(raw []byte) (*configFile, error) {
 	}
 
 	return cf, nil
+}
+
+// convertNamesToK8S gets a configFile object and converts all names
+// in it to names compatible with K8S resources, if necessary.
+func convertNamesToK8S(cf *configFile) error {
+	var err error
+	var validName bool
+
+	r := regexp.MustCompile("^[a-z][-a-z0-9]{0,61}[a-z0-9]{1}$")
+
+	for i := 0; i < len(cf.Pools); i++ {
+		validName = r.MatchString(cf.Pools[i].Name)
+		if validName {
+			continue
+		}
+		cf.Pools[i].Name, err = formatToK8S(cf.Pools[i].Name, "IpAddressPool")
+		if err != nil {
+			return err
+		}
+	}
+
+	for i := 0; i < len(cf.BFDProfiles); i++ {
+		validName = r.MatchString(cf.BFDProfiles[i].Name)
+		if validName {
+			continue
+		}
+		cf.BFDProfiles[i].Name, err = formatToK8S(cf.BFDProfiles[i].Name, "BFDProfile")
+		if err != nil {
+			return err
+		}
+	}
+
+	for i := 0; i < len(cf.Peers); i++ {
+		if len(cf.Peers[i].BFDProfile) == 0 {
+			continue
+		}
+		validName = r.MatchString(cf.Peers[i].BFDProfile)
+		if validName {
+			continue
+		}
+		cf.Peers[i].BFDProfile, err = formatToK8S(cf.Peers[i].BFDProfile, "BFDProfile")
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func formatToK8S(name string, kind string) (string, error) {
+	var truncated string
+
+	if len(name) > 63 {
+		truncated = name[:63]
+	} else {
+		truncated = name
+	}
+
+	lowercase := strings.ToLower(truncated)
+	noUnderscore := strings.ReplaceAll(lowercase, "_", "-")
+
+	firstLetterRegex := regexp.MustCompile("[a-z]")
+	firstLetter := firstLetterRegex.FindStringIndex(noUnderscore)
+	if len(firstLetter) == 0 {
+		return "", fmt.Errorf("failed to make %s K8S compatible: %s", kind, name)
+	}
+	final := noUnderscore[firstLetter[0]:]
+
+	if strings.Compare(name, final) != 0 {
+		log.Printf("Changing %s name from: %s to: %s",
+			kind, name, final)
+	}
+
+	return final, nil
 }
 
 // getConfigMapData gets raw bytes representing a ConfigMap and returns the
@@ -229,8 +310,8 @@ func bfdProfileFor(c *configFile) []v1beta1.BFDProfile {
 				TransmitInterval: bfd.TransmitInterval,
 				DetectMultiplier: bfd.DetectMultiplier,
 				EchoInterval:     bfd.EchoInterval,
-				EchoMode:         &bfd.EchoMode,
-				PassiveMode:      &bfd.PassiveMode,
+				EchoMode:         &c.BFDProfiles[i].EchoMode,
+				PassiveMode:      &c.BFDProfiles[i].PassiveMode,
 				MinimumTTL:       bfd.MinimumTTL,
 			},
 		}
@@ -310,7 +391,7 @@ func parsePeer(p peer) (*v1beta2.BGPPeer, error) {
 			Address:       p.Addr,
 			SrcAddress:    p.SrcAddr,
 			Port:          p.Port,
-			HoldTime:      metav1.Duration{Duration: holdTime},
+			HoldTime:      &metav1.Duration{Duration: holdTime},
 			RouterID:      p.RouterID,
 			NodeSelectors: nodeSels,
 			Password:      p.Password,
@@ -323,7 +404,7 @@ func parsePeer(p peer) (*v1beta2.BGPPeer, error) {
 		if err != nil {
 			return nil, err
 		}
-		res.Spec.KeepaliveTime = metav1.Duration{Duration: keepaliveTime}
+		res.Spec.KeepaliveTime = &metav1.Duration{Duration: keepaliveTime}
 	}
 
 	return res, nil
