@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"sort"
 
 	"github.com/go-kit/log/level"
 
@@ -25,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -67,8 +69,14 @@ func (r *ServiceReconciler) reprocessAll(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// Make it process the already assigned services first
+	sortedServices := services.Items
+	sort.Slice(sortedServices, func(i, j int) bool {
+		return len(sortedServices[i].Status.LoadBalancer.Ingress) > len(sortedServices[j].Status.LoadBalancer.Ingress)
+	})
+
 	retry := false
-	for _, service := range services.Items {
+	for _, service := range sortedServices {
 		service := service // so we can use &service
 		if filterByLoadBalancerClass(&service, r.LoadBalancerClass) {
 			level.Debug(r.Logger).Log("controller", "ServiceReconciler", "filtered service", req.NamespacedName)
@@ -76,10 +84,15 @@ func (r *ServiceReconciler) reprocessAll(ctx context.Context, req ctrl.Request) 
 		}
 
 		serviceName := types.NamespacedName{Namespace: service.Namespace, Name: service.Name}
-		eps, err := epsOrSlicesForServices(ctx, r, serviceName, r.Endpoints)
-		if err != nil {
-			level.Error(r.Logger).Log("controller", "ServiceReconciler - reprocessAll", "message", "failed to get endpoints", "service", serviceName.String(), "error", err)
-			return ctrl.Result{}, err
+
+		eps := []discovery.EndpointSlice{}
+		if r.Endpoints {
+			var err error
+			eps, err = epSlicesForService(ctx, r, serviceName)
+			if err != nil {
+				level.Error(r.Logger).Log("controller", "ServiceReconciler - reprocessAll", "message", "failed to get endpoints", "service", serviceName.String(), "error", err)
+				return ctrl.Result{}, err
+			}
 		}
 
 		level.Debug(r.Logger).Log("controller", "ServiceReconciler - reprocessAll", "reprocessing service", dumpResource(service))
@@ -101,6 +114,8 @@ func (r *ServiceReconciler) reprocessAll(ctx context.Context, req ctrl.Request) 
 		level.Info(r.Logger).Log("controller", "ServiceReconciler - reprocessAll", "event", "force service reload")
 		return ctrl.Result{}, errRetry
 	}
+	r.initialLoadPerformed = true
+
 	return ctrl.Result{}, nil
 }
 

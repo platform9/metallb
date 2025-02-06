@@ -3,10 +3,12 @@
 package routes
 
 import (
+	"fmt"
 	"net"
 
-	"github.com/pkg/errors"
-	"go.universe.tf/metallb/e2etest/pkg/executor"
+	"errors"
+
+	"go.universe.tf/e2etest/pkg/executor"
 )
 
 // Add route to target via for the given Executor.
@@ -29,7 +31,7 @@ func Add(exec executor.Executor, target, via, routingTable string) error {
 	args = append(args, dst.String(), "via", gw.String())
 	out, err := exec.Exec(cmd, args...)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to add route %s %s %s", cmd, args, out)
+		return errors.Join(err, fmt.Errorf("Failed to add route %s %s %s", cmd, args, out))
 	}
 
 	return nil
@@ -55,7 +57,7 @@ func Delete(exec executor.Executor, target, via, routingTable string) error {
 	args = append(args, dst.String(), "via", gw.String())
 	out, err := exec.Exec(cmd, args...)
 	if err != nil {
-		return errors.Wrapf(err, "failed to delete route %s", out)
+		return errors.Join(err, fmt.Errorf("failed to delete route %s", out))
 	}
 
 	return nil

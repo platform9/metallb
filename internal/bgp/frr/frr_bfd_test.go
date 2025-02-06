@@ -11,7 +11,7 @@ import (
 	"go.universe.tf/metallb/internal/bgp"
 	"go.universe.tf/metallb/internal/config"
 	"go.universe.tf/metallb/internal/logging"
-	"go.universe.tf/metallb/internal/pointer"
+	"k8s.io/utils/ptr"
 )
 
 func TestBFDProfileNoSessions(t *testing.T) {
@@ -20,23 +20,23 @@ func TestBFDProfileNoSessions(t *testing.T) {
 	pp := map[string]*config.BFDProfile{
 		"foo": {
 			Name:             "foo",
-			ReceiveInterval:  pointer.Uint32Ptr(60),
-			TransmitInterval: pointer.Uint32Ptr(70),
-			DetectMultiplier: pointer.Uint32Ptr(5),
-			EchoInterval:     pointer.Uint32Ptr(90),
+			ReceiveInterval:  ptr.To(uint32(60)),
+			TransmitInterval: ptr.To(uint32(70)),
+			DetectMultiplier: ptr.To(uint32(5)),
+			EchoInterval:     ptr.To(uint32(90)),
 			EchoMode:         false,
 			PassiveMode:      false,
-			MinimumTTL:       pointer.Uint32Ptr(60),
+			MinimumTTL:       ptr.To(uint32(60)),
 		},
 		"bar": {
 			Name:             "bar",
-			ReceiveInterval:  pointer.Uint32Ptr(60),
-			TransmitInterval: pointer.Uint32Ptr(70),
-			DetectMultiplier: pointer.Uint32Ptr(5),
-			EchoInterval:     pointer.Uint32Ptr(90),
+			ReceiveInterval:  ptr.To(uint32(60)),
+			TransmitInterval: ptr.To(uint32(70)),
+			DetectMultiplier: ptr.To(uint32(5)),
+			EchoInterval:     ptr.To(uint32(90)),
 			EchoMode:         false,
 			PassiveMode:      false,
-			MinimumTTL:       pointer.Uint32Ptr(60),
+			MinimumTTL:       ptr.To(uint32(60)),
 		},
 	}
 	l := log.NewNopLogger()
@@ -61,13 +61,13 @@ func TestBFDProfileCornerCases(t *testing.T) {
 	pp := map[string]*config.BFDProfile{
 		"foo": {
 			Name:             "foo",
-			ReceiveInterval:  pointer.Uint32Ptr(60),
-			TransmitInterval: pointer.Uint32Ptr(70),
-			DetectMultiplier: pointer.Uint32Ptr(5),
-			EchoInterval:     pointer.Uint32Ptr(90),
+			ReceiveInterval:  ptr.To(uint32(60)),
+			TransmitInterval: ptr.To(uint32(70)),
+			DetectMultiplier: ptr.To(uint32(5)),
+			EchoInterval:     ptr.To(uint32(90)),
 			EchoMode:         true,
 			PassiveMode:      true,
-			MinimumTTL:       pointer.Uint32Ptr(60),
+			MinimumTTL:       ptr.To(uint32(60)),
 		},
 	}
 
@@ -93,23 +93,23 @@ func TestBFDWithSession(t *testing.T) {
 	pp := map[string]*config.BFDProfile{
 		"foo": {
 			Name:             "foo",
-			ReceiveInterval:  pointer.Uint32Ptr(60),
-			TransmitInterval: pointer.Uint32Ptr(70),
-			DetectMultiplier: pointer.Uint32Ptr(5),
-			EchoInterval:     pointer.Uint32Ptr(90),
+			ReceiveInterval:  ptr.To(uint32(60)),
+			TransmitInterval: ptr.To(uint32(70)),
+			DetectMultiplier: ptr.To(uint32(5)),
+			EchoInterval:     ptr.To(uint32(90)),
 			EchoMode:         false,
 			PassiveMode:      false,
-			MinimumTTL:       pointer.Uint32Ptr(60),
+			MinimumTTL:       ptr.To(uint32(60)),
 		},
 		"bar": {
 			Name:             "bar",
-			ReceiveInterval:  pointer.Uint32Ptr(60),
-			TransmitInterval: pointer.Uint32Ptr(70),
-			DetectMultiplier: pointer.Uint32Ptr(5),
-			EchoInterval:     pointer.Uint32Ptr(90),
+			ReceiveInterval:  ptr.To(uint32(60)),
+			TransmitInterval: ptr.To(uint32(70)),
+			DetectMultiplier: ptr.To(uint32(5)),
+			EchoInterval:     ptr.To(uint32(90)),
 			EchoMode:         false,
 			PassiveMode:      false,
-			MinimumTTL:       pointer.Uint32Ptr(60),
+			MinimumTTL:       ptr.To(uint32(60)),
 		},
 	}
 
@@ -129,8 +129,8 @@ func TestBFDWithSession(t *testing.T) {
 			MyASN:         100,
 			RouterID:      net.ParseIP("10.1.1.254"),
 			PeerASN:       200,
-			HoldTime:      time.Second,
-			KeepAliveTime: 2 * time.Second,
+			HoldTime:      ptr.To(time.Second),
+			KeepAliveTime: ptr.To(2 * time.Second),
 			Password:      "password",
 			CurrentNode:   "hostname",
 			EBGPMultiHop:  true,
@@ -154,13 +154,13 @@ func TestBFDProfileAllDefault(t *testing.T) {
 	pp := map[string]*config.BFDProfile{
 		"foo": {
 			Name:             "foo",
-			ReceiveInterval:  pointer.Uint32Ptr(60),
-			TransmitInterval: pointer.Uint32Ptr(70),
-			DetectMultiplier: pointer.Uint32Ptr(5),
-			EchoInterval:     pointer.Uint32Ptr(90),
+			ReceiveInterval:  ptr.To(uint32(60)),
+			TransmitInterval: ptr.To(uint32(70)),
+			DetectMultiplier: ptr.To(uint32(5)),
+			EchoInterval:     ptr.To(uint32(90)),
 			EchoMode:         false,
 			PassiveMode:      false,
-			MinimumTTL:       pointer.Uint32Ptr(60),
+			MinimumTTL:       ptr.To(uint32(60)),
 		},
 		"bar": {
 			Name: "bar",
@@ -181,4 +181,35 @@ func TestBFDProfileAllDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to sync bfd profiles %s", err)
 	}
+}
+
+func TestBFDProfileThenDelete(t *testing.T) {
+	testSetup(t)
+
+	pp := map[string]*config.BFDProfile{
+		"foo": {
+			Name:             "foo",
+			ReceiveInterval:  ptr.To(uint32(60)),
+			TransmitInterval: ptr.To(uint32(70)),
+			DetectMultiplier: ptr.To(uint32(5)),
+			EchoInterval:     ptr.To(uint32(90)),
+			EchoMode:         false,
+			PassiveMode:      false,
+			MinimumTTL:       ptr.To(uint32(60)),
+		},
+	}
+	l := log.NewNopLogger()
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
+	defer close(sessionManager.reloadConfig)
+
+	err := sessionManager.SyncBFDProfiles(pp)
+	if err != nil {
+		t.Fatalf("Failed to sync bfd profiles: %s", err)
+	}
+
+	err = sessionManager.SyncBFDProfiles(map[string]*config.BFDProfile{})
+	if err != nil {
+		t.Fatalf("Failed to sync bfd profiles: %s", err)
+	}
+	testCheckConfigFile(t)
 }

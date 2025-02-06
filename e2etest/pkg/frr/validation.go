@@ -7,16 +7,15 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	bgpfrr "go.universe.tf/metallb/internal/bgp/frr"
-	"go.universe.tf/metallb/internal/ipfamily"
+	"go.universe.tf/e2etest/pkg/ipfamily"
+	"go.universe.tf/e2etest/pkg/k8s"
 )
 
 // NeighborsMatchNodes tells if ALL the given nodes are peered with the
 // frr instance. We only care about established connections, as the
 // frr instance may be configured with more nodes than are currently
 // paired.
-func NeighborsMatchNodes(nodes []v1.Node, neighbors []*bgpfrr.Neighbor, ipFamily ipfamily.Family, vrfName string) error {
+func NeighborsMatchNodes(nodes []v1.Node, neighbors NeighborsMap, ipFamily ipfamily.Family, vrfName string) error {
 	nodesIPs := map[string]struct{}{}
 
 	ips, err := k8s.NodeIPsForFamily(nodes, ipFamily, vrfName)
@@ -27,23 +26,23 @@ func NeighborsMatchNodes(nodes []v1.Node, neighbors []*bgpfrr.Neighbor, ipFamily
 		nodesIPs[ip] = struct{}{}
 	}
 	for _, n := range neighbors {
-		if _, ok := nodesIPs[n.IP.String()]; !ok { // skipping neighbors that are not nodes
+		if _, ok := nodesIPs[n.ID]; !ok { // skipping neighbors that are not nodes
 			continue
 		}
 		if !n.Connected {
-			return fmt.Errorf("node %s BGP session not established", n.IP.String())
+			return fmt.Errorf("node %s BGP session not established", n.ID)
 		}
-		delete(nodesIPs, n.IP.String())
+		delete(nodesIPs, n.ID)
 	}
 	if len(nodesIPs) != 0 { // some leftover, meaning more nodes than neighbors
-		return fmt.Errorf("IP %v found in nodes but not in neighbors", nodesIPs)
+		return fmt.Errorf("vrfName=%s ,nodeIPS=%v vs nextHops=%v\n", vrfName, ips, neighbors)
 	}
 	return nil
 }
 
 // RoutesMatchNodes tells if ALL the given nodes are exposed as
 // destinations for the given address.
-func RoutesMatchNodes(nodes []v1.Node, route bgpfrr.Route, ipFamily ipfamily.Family, vrfName string) error {
+func RoutesMatchNodes(nodes []v1.Node, route Route, ipFamily ipfamily.Family, vrfName string) error {
 	nodesIPs := map[string]struct{}{}
 
 	ips, err := k8s.NodeIPsForFamily(nodes, ipFamily, vrfName)
@@ -62,12 +61,12 @@ func RoutesMatchNodes(nodes []v1.Node, route bgpfrr.Route, ipFamily ipfamily.Fam
 		delete(nodesIPs, h.String())
 	}
 	if len(nodesIPs) != 0 { // some leftover, meaning more nodes than routes
-		return fmt.Errorf("IP %v found in nodes but not in next hops", nodesIPs)
+		return fmt.Errorf("vrfName=%s ,nodeIPS=%v vs nextHops=%v\n", vrfName, ips, route.NextHops)
 	}
 	return nil
 }
 
-func BFDPeersMatchNodes(nodes []v1.Node, peers map[string]bgpfrr.BFDPeer, ipFamily ipfamily.Family, vrfName string) error {
+func BFDPeersMatchNodes(nodes []v1.Node, peers map[string]BFDPeer, ipFamily ipfamily.Family, vrfName string) error {
 	nodesIPs := map[string]struct{}{}
 	ips, err := k8s.NodeIPsForFamily(nodes, ipFamily, vrfName)
 	if err != nil {

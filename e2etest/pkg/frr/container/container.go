@@ -11,12 +11,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
-	"go.universe.tf/metallb/e2etest/pkg/executor"
-	"go.universe.tf/metallb/e2etest/pkg/frr"
-	frrconfig "go.universe.tf/metallb/e2etest/pkg/frr/config"
-	"go.universe.tf/metallb/e2etest/pkg/frr/consts"
-	"go.universe.tf/metallb/internal/ipfamily"
+	"errors"
+
+	"go.universe.tf/e2etest/pkg/container"
+	"go.universe.tf/e2etest/pkg/executor"
+	"go.universe.tf/e2etest/pkg/frr"
+	frrconfig "go.universe.tf/e2etest/pkg/frr/config"
+	"go.universe.tf/e2etest/pkg/frr/consts"
+	"go.universe.tf/e2etest/pkg/ipfamily"
+	"go.universe.tf/e2etest/pkg/netdev"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
@@ -25,10 +28,9 @@ import (
 const (
 	// BGP configuration directory.
 	frrConfigDir = "config/frr"
-	// FRR routing image.
-	frrImage = "quay.io/frrouting/frr:8.4.2"
 	// Host network name.
 	hostNetwork = "host"
+	noNetwork   = "none"
 	// FRR container mount destination path.
 	frrMountPath = "/etc/frr"
 )
@@ -47,6 +49,7 @@ type FRR struct {
 
 type Config struct {
 	Name     string
+	Image    string
 	Neighbor frrconfig.NeighborConfig
 	Router   frrconfig.RouterConfig
 	HostIPv4 string
@@ -69,6 +72,10 @@ func Create(configs map[string]Config) ([]*FRR, error) {
 				"bfdd":     true,
 			}
 			c, err := start(conf)
+			if err != nil {
+				return err
+			}
+
 			if c != nil {
 				err = wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
 					daemons, err := frr.Daemons(c)
@@ -88,7 +95,7 @@ func Create(configs map[string]Config) ([]*FRR, error) {
 				frrContainers = append(frrContainers, c)
 			}
 			if err != nil {
-				return errors.Wrapf(err, "failed to wait for daemons %v", toFind)
+				return errors.Join(err, fmt.Errorf("failed to wait for daemons %v", toFind))
 			}
 
 			return nil
@@ -161,7 +168,7 @@ func start(cfg Config) (*FRR, error) {
 	srcFiles := fmt.Sprintf("%s/.", frrConfigDir)
 	res, err := exec.Command("cp", "-r", srcFiles, testDirName).CombinedOutput()
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to copy FRR config directory. %s", string(res))
+		return nil, errors.Join(err, fmt.Errorf("failed to copy FRR config directory. %s", string(res)))
 	}
 
 	err = frrconfig.SetDaemonsConfig(testDirName, cfg.Router)
@@ -170,10 +177,10 @@ func start(cfg Config) (*FRR, error) {
 	}
 
 	volume := fmt.Sprintf("%s:%s", testDirName, frrMountPath)
-	args := []string{"run", "-d", "--privileged", "--network", cfg.Network, "--rm", "--ulimit", "core=-1", "--name", cfg.Name, "--volume", volume, frrImage}
+	args := []string{"run", "-d", "--privileged", "--network", cfg.Network, "--rm", "--ulimit", "core=-1", "--name", cfg.Name, "--volume", volume, cfg.Image}
 	out, err := exec.Command(executor.ContainerRuntime, args...).CombinedOutput()
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to start %s container. %s", cfg.Name, out)
+		return nil, errors.Join(err, fmt.Errorf("failed to start %s container. %s", cfg.Name, out))
 	}
 
 	frr, err := configureContainer(cfg, testDirName)
@@ -198,7 +205,12 @@ func configureContainer(cfg Config, configDir string) (*FRR, error) {
 		Network:        cfg.Network,
 	}
 
-	if cfg.Network == hostNetwork {
+	switch cfg.Network {
+	case noNetwork:
+		// In Unnumbered scenario this will be replaced with LLA address of the nic
+		frr.Ipv4 = ""
+		frr.Ipv6 = ""
+	case hostNetwork:
 		if net.ParseIP(cfg.HostIPv4) == nil {
 			return nil, errors.New("Invalid hostIPv4")
 		}
@@ -208,15 +220,14 @@ func configureContainer(cfg Config, configDir string) (*FRR, error) {
 
 		frr.Ipv4 = cfg.HostIPv4
 		frr.Ipv6 = cfg.HostIPv6
-	} else {
-		err := frr.updateIPS()
-		if err != nil {
+
+		frr.RouterConfig.RouterID = frr.Ipv4
+	default:
+		if err := frr.updateIPS(); err != nil {
 			return frr, err
 		}
+		frr.RouterConfig.RouterID = frr.Ipv4
 	}
-
-	// setting routerid after calculating ips
-	frr.RouterConfig.RouterID = frr.Ipv4
 
 	err := frr.updateVolumePermissions()
 	if err != nil {
@@ -231,7 +242,7 @@ func (c *FRR) updateIPS() (err error) {
 	containerIP, err := exec.Command(executor.ContainerRuntime, "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
 		c.Name).CombinedOutput()
 	if err != nil {
-		return errors.Wrapf(err, "failed to get FRR IPv4 address")
+		return errors.Join(err, errors.New("failed to get FRR IPv4 address"))
 	}
 
 	containerIPv4 := strings.TrimSuffix(string(containerIP), "\n")
@@ -239,13 +250,13 @@ func (c *FRR) updateIPS() (err error) {
 	containerIP, err = exec.Command(executor.ContainerRuntime, "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}",
 		c.Name).CombinedOutput()
 	if err != nil {
-		return errors.Wrapf(err, "failed to get FRR IPv6 address")
+		return errors.Join(err, errors.New("failed to get FRR IPv6 address"))
 	}
 
 	containerIPv6 := strings.TrimSuffix(string(containerIP), "\n")
 
 	if containerIPv4 == "" && containerIPv6 == "" {
-		return errors.Errorf("failed to get FRR IP addresses")
+		return errors.New("failed to get FRR IP addresses")
 	}
 	c.Ipv4 = containerIPv4
 	c.Ipv6 = containerIPv6
@@ -257,12 +268,13 @@ func (c *FRR) updateIPS() (err error) {
 func (c *FRR) UpdateBGPConfigFile(bgpConfig string) error {
 	err := frrconfig.SetBGPConfig(c.configDir, bgpConfig)
 	if err != nil {
-		return errors.Wrapf(err, "failed to update BGP config file")
+		return errors.Join(err, errors.New("failed to update BGP config file"))
 	}
 
 	err = reloadFRRConfig(consts.BGPConfigFile, c)
 	if err != nil {
-		return errors.Wrapf(err, "failed to reload BGP config file")
+		return errors.Join(err, errors.New("failed to update BGP config file"))
+
 	}
 
 	return nil
@@ -273,12 +285,12 @@ func (c *FRR) delete() error {
 	// Kill the BGP router container.
 	out, err := exec.Command(executor.ContainerRuntime, "kill", c.Name).CombinedOutput()
 	if err != nil {
-		return errors.Wrapf(err, "failed to kill %s container. %s", c.Name, out)
+		return errors.Join(err, fmt.Errorf("failed to kill %s container. %s", c.Name, out))
 	}
 
 	err = os.RemoveAll(c.configDir)
 	if err != nil {
-		return errors.Wrapf(err, "failed to delete FRR config directory")
+		return errors.Join(err, errors.New("failed to delete FRR config directory"))
 	}
 
 	return nil
@@ -315,7 +327,7 @@ func (c *FRR) updateVolumePermissions() error {
 	cmd := fmt.Sprintf("chown -R %d:%d %s", uid, gid, frrMountPath)
 	out, err := exec.Command(executor.ContainerRuntime, "exec", c.Name, "sh", "-c", cmd).CombinedOutput()
 	if err != nil {
-		return errors.Wrapf(err, "failed to change %s container volume permissions. %s", c.Name, string(out))
+		return errors.Join(err, fmt.Errorf("failed to change %s container volume permissions. %s", c.Name, string(out)))
 	}
 
 	return nil
@@ -327,14 +339,14 @@ func reloadFRRConfig(configFile string, exec executor.Executor) error {
 	cmd := fmt.Sprintf("python3 /usr/lib/frr/frr-reload.py --test --stdout %s/%s", frrMountPath, configFile)
 	out, err := exec.Exec("sh", "-c", cmd)
 	if err != nil {
-		return errors.Wrapf(err, "failed to check configuration file. %s", out)
+		return errors.Join(err, fmt.Errorf("failed to check configuration file. %s", out))
 	}
 
 	// Applying the configuration file.
 	cmd = fmt.Sprintf("python3 /usr/lib/frr/frr-reload.py --reload --overwrite --stdout %s/%s", frrMountPath, configFile)
 	out, err = exec.Exec("sh", "-c", cmd)
 	if err != nil {
-		return errors.Wrapf(err, "failed to apply configuration file. %s", out)
+		return errors.Join(err, fmt.Errorf("failed to apply configuration file. %s", out))
 	}
 
 	return nil
@@ -363,4 +375,37 @@ func containerIsRunning(containerName string) error {
 	}
 
 	return nil
+}
+
+func CreateP2PPeerFor(nodeContainer, dev, frrImage string) (*FRR, error) {
+	c := Config{
+		Name:    fmt.Sprintf("unnumbered-p2p-%s-%s", nodeContainer, dev),
+		Image:   frrImage,
+		Network: noNetwork,
+		Router: frrconfig.RouterConfig{
+			BGPPort: 179,
+		},
+	}
+
+	peers, err := Create(map[string]Config{"peer": c})
+	if err != nil {
+		return nil, fmt.Errorf("create container failed - %w", err)
+	}
+
+	peer := peers[0]
+
+	if err := container.WireContainers(peer.Name, nodeContainer, dev); err != nil {
+		return nil, fmt.Errorf("wire the peer failed - %w", err)
+	}
+	lla, err := netdev.LinkLocalAddressForDevice(peer, dev)
+	if err != nil {
+		return nil, err
+	}
+	// Note .Ipv4 to have LLA IPv6 is valid https://datatracker.ietf.org/doc/html/rfc8950
+	//	 $ ip route get 200.100.100.1
+	//       200.100.100.1 via inet6 fe80::2c5f:eff:fec4:cf7b dev net0
+	peer.Ipv4 = lla
+	peer.Ipv6 = lla
+
+	return peer, nil
 }

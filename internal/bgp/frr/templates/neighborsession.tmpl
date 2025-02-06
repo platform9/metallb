@@ -6,17 +6,26 @@
   {{ if .neighbor.Port -}}
   neighbor {{.neighbor.Addr}} port {{.neighbor.Port}}
   {{- end }}
+  {{- if and .neighbor.KeepaliveTime .neighbor.HoldTime }}
   neighbor {{.neighbor.Addr}} timers {{.neighbor.KeepaliveTime}} {{.neighbor.HoldTime}}
+  {{- end }}
+  {{- if ne .neighbor.ConnectTime 0}}
+  neighbor {{.neighbor.Addr}} timers connect {{.neighbor.ConnectTime}}
+  {{- end }}
   {{ if .neighbor.Password -}}
   neighbor {{.neighbor.Addr}} password {{.neighbor.Password}}
   {{- end }}
   {{ if .neighbor.SrcAddr -}}
   neighbor {{.neighbor.Addr}} update-source {{.neighbor.SrcAddr}}
   {{- end }}
-{{- if ne .neighbor.BFDProfile ""}}
+  {{- if .neighbor.GracefulRestart }}
+  neighbor {{.neighbor.Addr}} graceful-restart
+  {{- end }}
+  {{- if ne .neighbor.BFDProfile "" }}
+  neighbor {{.neighbor.Addr}} bfd
   neighbor {{.neighbor.Addr}} bfd profile {{.neighbor.BFDProfile}}
-{{- end }}
-{{- if  mustDisableConnectedCheck .neighbor.IPFamily .routerASN .neighbor.ASN .neighbor.EBGPMultiHop }}
+  {{- end }}
+  {{- if  mustDisableConnectedCheck .neighbor.IPFamily .routerASN .neighbor.ASN .neighbor.EBGPMultiHop }}
   neighbor {{.neighbor.Addr}} disable-connected-check
-{{- end }}
+  {{- end }}
 {{- end -}}
