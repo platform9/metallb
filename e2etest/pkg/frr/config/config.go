@@ -10,10 +10,11 @@ import (
 	"os"
 	"text/template"
 
-	"github.com/pkg/errors"
-	consts "go.universe.tf/metallb/e2etest/pkg/frr/consts"
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	"go.universe.tf/metallb/internal/ipfamily"
+	"errors"
+
+	consts "go.universe.tf/e2etest/pkg/frr/consts"
+	"go.universe.tf/e2etest/pkg/ipfamily"
+	"go.universe.tf/e2etest/pkg/k8s"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 )
@@ -26,11 +27,23 @@ log file /tmp/frr.log debugging`
 const bgpConfigTemplate = `
 password zebra
 
-debug bgp updates
-debug bgp neighbor
+debug zebra events
+debug zebra kernel
+debug zebra rib
 debug zebra nht
+debug zebra nexthop
+debug bgp keepalives
+debug bgp neighbor-events
 debug bgp nht
+debug bgp updates in
+debug bgp updates out
+debug bgp zebra
+debug bgp bfd
 debug bfd peer
+debug bfd zebra
+debug bfd network
+debug bfd distributed
+!
 ip nht resolve-via-default
 ipv6 nht resolve-via-default
 
@@ -52,7 +65,7 @@ router bgp {{$ROUTERASN}}
   {{ if .Password -}}
   neighbor {{.Addr}} password {{.Password}}
   {{- end }}
-{{- if .BFDEnabled }} 
+{{- if .BFDEnabled }}
   neighbor {{.Addr}} bfd
 {{- end -}}
 {{- end }}
@@ -61,8 +74,8 @@ router bgp {{$ROUTERASN}}
 {{range .AcceptV4Neighbors }}
     neighbor {{.Addr}} next-hop-self
     neighbor {{.Addr}} activate
-    {{- if .ToAdvertise}}
-    network {{.ToAdvertise}}
+    {{range .ToAdvertiseV4 }}
+    network {{.}}
     {{- end }}
 {{- end }}
   exit-address-family
@@ -73,8 +86,8 @@ router bgp {{$ROUTERASN}}
     neighbor {{.Addr}} next-hop-self
     neighbor {{.Addr}} activate
     neighbor {{.Addr}} route-map RMAP in
-    {{- if .ToAdvertise}}
-    network {{.ToAdvertise}}
+    {{range .ToAdvertiseV6 }}
+    network {{.}}
     {{- end }}
 {{- end }}
 exit-address-family
@@ -94,12 +107,14 @@ type RouterConfig struct {
 }
 
 type NeighborConfig struct {
-	ASN         uint32
-	Addr        string
-	Password    string
-	BFDEnabled  bool
-	ToAdvertise string
-	MultiHop    bool
+	ASN             uint32
+	Addr            string
+	Password        string
+	BFDEnabled      bool
+	ToAdvertiseV4   []string
+	ToAdvertiseV6   []string
+	MultiHop        bool
+	GracefulRestart bool
 }
 
 type MultiProtocol bool
@@ -120,7 +135,7 @@ func BGPPeersForAllNodes(cs clientset.Interface, nc NeighborConfig, rc RouterCon
 
 	nodes, err := cs.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		return "", errors.Wrapf(err, "Failed to get cluster nodes")
+		return "", errors.Join(err, errors.New("Failed to get cluster nodes"))
 	}
 
 	ips, err := k8s.NodeIPsForFamily(nodes.Items, ipFamily, rc.VRF)
@@ -147,13 +162,13 @@ func BGPPeersForAllNodes(cs clientset.Interface, nc NeighborConfig, rc RouterCon
 
 	t, err := template.New("bgp Config Template").Parse(bgpConfigTemplate)
 	if err != nil {
-		return "", errors.Wrapf(err, "Failed to create bgp template")
+		return "", errors.Join(err, errors.New("Failed to create bgp template"))
 	}
 
 	var b bytes.Buffer
 	err = t.Execute(&b, router)
 	if err != nil {
-		return "", errors.Wrapf(err, "Failed to update bgp template")
+		return "", errors.Join(err, errors.New("Failed to update bgp template"))
 	}
 
 	return b.String(), nil
@@ -164,13 +179,13 @@ func SetBGPConfig(testDirName string, config string) error {
 	path := fmt.Sprintf("%s/%s", testDirName, consts.BGPConfigFile)
 	f, err := os.Create(path)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to open file %s", path)
+		return errors.Join(err, fmt.Errorf("Failed to open file %s", path))
 	}
 	defer f.Close()
 
 	_, err = f.WriteString(config)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to write to file %s", path)
+		return errors.Join(err, fmt.Errorf("Failed to write to file %s", path))
 	}
 	return nil
 }
@@ -180,12 +195,12 @@ func SetDaemonsConfig(testDirName string, rc RouterConfig) error {
 	path := fmt.Sprintf("%s/%s", testDirName, consts.DaemonsConfigFile)
 	tpl, err := template.ParseFiles(path)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to parse %s", path)
+		return errors.Join(err, fmt.Errorf("Failed to parse %s", path))
 	}
 
 	f, err := os.Create(path)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to open file %s", path)
+		return errors.Join(err, fmt.Errorf("Failed to open file %s", path))
 	}
 
 	defer f.Close()
@@ -200,7 +215,7 @@ func SetDaemonsConfig(testDirName string, rc RouterConfig) error {
 
 	err = tpl.Execute(f, info)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to update %s", path)
+		return errors.Join(err, fmt.Errorf("Failed to update %s", path))
 	}
 
 	return nil

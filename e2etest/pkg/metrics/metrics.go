@@ -12,11 +12,11 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
-	"go.universe.tf/metallb/e2etest/pkg/executor"
+	"go.universe.tf/e2etest/pkg/executor"
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/pkg/errors"
+	"errors"
 )
 
 type PrometheusResponse struct {
@@ -31,23 +31,33 @@ type prometheusResponseData struct {
 
 // MetricsForPod returns the parsed metrics for the given pod, scraping them
 // from the source pod.
-func ForPod(controller, target *corev1.Pod, namespace string) ([]map[string]*dto.MetricFamily, error) {
+func ForPod(promPod, target *corev1.Pod, namespace string) ([]map[string]*dto.MetricFamily, error) {
 	ports := make([]int, 0)
 	allMetrics := make([]map[string]*dto.MetricFamily, 0)
 	for _, c := range target.Spec.Containers {
 		for _, p := range c.Ports {
-			if p.Name == "monitoring" {
+			if p.Name == "metricshttps" || p.Name == "frrmetricshttps" {
 				ports = append(ports, int(p.ContainerPort))
 			}
 		}
 	}
 
-	podExecutor := executor.ForPod(namespace, controller.Name, "controller")
+	podExecutor := executor.ForPod(promPod.Namespace, promPod.Name, "prometheus")
+
+	// We add a token header to the requests, without it kube-rbac-proxy returns Unauthorized.
+	token, err := podExecutor.Exec("cat", "/var/run/secrets/kubernetes.io/serviceaccount/token")
+	if err != nil {
+		return nil, err
+	}
+
 	for _, p := range ports {
-		metricsURL := path.Join(net.JoinHostPort(target.Status.PodIP, strconv.Itoa(p)), "metrics")
-		metrics, err := podExecutor.Exec("wget", "-qO-", metricsURL)
+		metricsPath := path.Join(net.JoinHostPort(target.Status.PodIP, strconv.Itoa(p)), "metrics")
+		metricsURL := fmt.Sprintf("https://%s", metricsPath)
+		metrics, err := podExecutor.Exec("wget",
+			"--no-check-certificate", "-qO-", metricsURL,
+			"--header", fmt.Sprintf("Authorization: Bearer %s", token))
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to scrape metrics for %s", target.Name)
+			return nil, errors.Join(err, fmt.Errorf("failed to scrape metrics for %s", target.Name))
 		}
 		res, err := metricsFromString(metrics)
 		if err != nil {
@@ -173,7 +183,7 @@ func metricsFromString(metrics string) (map[string]*dto.MetricFamily, error) {
 	var parser expfmt.TextParser
 	mf, err := parser.TextToMetricFamilies(strings.NewReader(metrics))
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to parse metrics %s", metrics)
+		return nil, errors.Join(err, fmt.Errorf("failed to parse metrics %s", metrics))
 	}
 	return mf, nil
 }

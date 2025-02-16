@@ -4,6 +4,13 @@ title: Prometheus Metrics
 
 MetalLB exposes different Prometheus metrics that are listed below.
 
+## MetalLB Allocator Addresses metrics
+
+| Name                                     | Description                              |
+| ---------------------------------------- | ---------------------------------------- |
+| metallb_allocator_addresses_in_use_total | Number of IP addresses in use, per pool  |
+| metallb_allocator_addresses_total        | Number of usable IP addresses, per pool  |
+
 ## MetalLB K8S client metrics
 
 | Name                                   | Description                                                                      |
@@ -22,6 +29,15 @@ metallb_bgp_updates_total{peer="172.23.0.5:0"} 1
 metallb_bgp_updates_total{peer="172.23.0.6:0"} 1
 metallb_bgp_updates_total{peer="172.30.0.2:0"} 1
 metallb_bgp_updates_total{peer="172.30.0.3:0"} 1
+```
+
+when using BGP with a vrf, an additional label with the name of the vrf is added:
+
+```bash
+# HELP metallb_bgp_updates_total Number of BGP UPDATE messages sent
+# TYPE metallb_bgp_updates_total counter
+metallb_bgp_updates_total{peer="172.23.0.5:0"} 1
+metallb_bgp_updates_total{peer="172.23.0.5:0" vrf="red"} 1
 ```
 
 | Name                                 | Description                                                      |

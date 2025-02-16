@@ -22,8 +22,8 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 
+	k8snodes "go.universe.tf/metallb/internal/k8s/nodes"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,11 +33,12 @@ import (
 
 type NodeReconciler struct {
 	client.Client
-	Logger    log.Logger
-	Scheme    *runtime.Scheme
-	NodeName  string
-	Namespace string
-	Handler   func(log.Logger, *corev1.Node) SyncState
+	Logger      log.Logger
+	Scheme      *runtime.Scheme
+	NodeName    string
+	Namespace   string
+	Handler     func(log.Logger, *corev1.Node) SyncState
+	ForceReload func()
 }
 
 func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -57,7 +58,8 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		updateErrors.Inc()
 		return ctrl.Result{}, errRetry
 	case SyncStateReprocessAll:
-		level.Error(r.Logger).Log("controller", "NodeReconciler", "error", "unexpected result reprocess all")
+		level.Info(r.Logger).Log("controller", "NodeReconciler", "event", "force service reload")
+		r.ForceReload()
 		return ctrl.Result{}, nil
 	case SyncStateErrorNoRetry:
 		updateErrors.Inc()
@@ -66,46 +68,69 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	return ctrl.Result{}, nil
 }
 
-func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	p := predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			return r.filterOtherNodes(e.Object)
-		},
-		DeleteFunc: func(e event.DeleteEvent) bool {
-			return r.filterOtherNodes(e.Object)
-		},
-		GenericFunc: func(e event.GenericEvent) bool {
-			return r.filterOtherNodes(e.Object)
-		},
+func NodeReconcilerPredicate() predicate.Predicate {
+	allowDeletions := predicate.Funcs{
+		DeleteFunc: func(_ event.DeleteEvent) bool { return true },
+	}
+
+	allowCreations := predicate.Funcs{
+		CreateFunc: func(_ event.CreateEvent) bool { return true },
+	}
+
+	nodeConditionNetworkAvailabilityStatusChanged := predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			newNodeObj, ok := e.ObjectNew.(*corev1.Node)
+			oldNode, ok := e.ObjectOld.(*corev1.Node)
 			if !ok {
-				level.Error(r.Logger).Log("controller", "NodeReconciler", "error", "new object is not node", "name", newNodeObj.GetName())
-				return true
-			}
-			oldNodeObj, ok := e.ObjectOld.(*corev1.Node)
-			if !ok {
-				level.Error(r.Logger).Log("controller", "NodeReconciler", "error", "old object is not node", "name", oldNodeObj.GetName())
-				return true
-			}
-			// If there is no changes in node labels, ignore event.
-			if labels.Equals(labels.Set(oldNodeObj.Labels), labels.Set(newNodeObj.Labels)) {
 				return false
 			}
-			return r.filterOtherNodes(newNodeObj)
+
+			newNode, ok := e.ObjectNew.(*corev1.Node)
+			if !ok {
+				return false
+			}
+
+			if k8snodes.IsNetworkUnavailable(oldNode) != k8snodes.IsNetworkUnavailable(newNode) {
+				return true
+			}
+
+			return false
 		},
 	}
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Node{}).
-		WithEventFilter(p).
-		Complete(r)
+
+	nodeSpecSchedulableChanged := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldNode, ok := e.ObjectOld.(*corev1.Node)
+			if !ok {
+				return false
+			}
+
+			newNode, ok := e.ObjectNew.(*corev1.Node)
+			if !ok {
+				return false
+			}
+
+			if oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable {
+				return true
+			}
+
+			return false
+		},
+	}
+
+	return predicate.And(
+		allowDeletions,
+		allowCreations,
+		predicate.Or(
+			nodeConditionNetworkAvailabilityStatusChanged,
+			nodeSpecSchedulableChanged,
+			predicate.LabelChangedPredicate{},
+		),
+	)
 }
 
-func (r *NodeReconciler) filterOtherNodes(obj client.Object) bool {
-	node, ok := obj.(*corev1.Node)
-	if !ok {
-		level.Error(r.Logger).Log("controller", "NodeReconciler", "error", "object is not node", "name", obj.GetName())
-		return false
-	}
-	return node.Name == r.NodeName
+func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Node{}).
+		WithEventFilter(NodeReconcilerPredicate()).
+		Complete(r)
 }

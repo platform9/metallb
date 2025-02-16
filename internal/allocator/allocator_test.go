@@ -3,6 +3,7 @@
 package allocator
 
 import (
+	"fmt"
 	"math"
 	"net"
 	"reflect"
@@ -16,24 +17,58 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/google/go-cmp/cmp"
 	ptu "github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
-var svc = &v1.Service{
-	ObjectMeta: metav1.ObjectMeta{
-		Name: "test-lb-service",
-	},
-	Spec: v1.ServiceSpec{
-		Type: v1.ServiceTypeLoadBalancer,
-		Ports: []v1.ServicePort{
-			{
-				Protocol: v1.ProtocolTCP,
-				Port:     8080,
+var (
+	svc = &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-lb-service",
+		},
+		Spec: v1.ServiceSpec{
+			Type: v1.ServiceTypeLoadBalancer,
+			Ports: []v1.ServicePort{
+				{
+					Protocol: v1.ProtocolTCP,
+					Port:     8080,
+				},
 			},
 		},
-	},
-}
+	}
+	svcRequireDualStack = &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-lb-service-require-dualstack",
+		},
+		Spec: v1.ServiceSpec{
+			IPFamilyPolicy: ptr.To(v1.IPFamilyPolicyRequireDualStack),
+			Type:           v1.ServiceTypeLoadBalancer,
+			Ports: []v1.ServicePort{
+				{
+					Protocol: v1.ProtocolTCP,
+					Port:     8080,
+				},
+			},
+		},
+	}
+	svcPreferDualStack = &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-lb-service-prefer-dualstack",
+		},
+		Spec: v1.ServiceSpec{
+			IPFamilyPolicy: ptr.To(v1.IPFamilyPolicyPreferDualStack),
+			Type:           v1.ServiceTypeLoadBalancer,
+			Ports: []v1.ServicePort{
+				{
+					Protocol: v1.ProtocolTCP,
+					Port:     8080,
+				},
+			},
+		},
+	}
+)
 
 func selector(s string) labels.Selector {
 	ret, err := labels.Parse(s)
@@ -43,9 +78,11 @@ func selector(s string) labels.Selector {
 	return ret
 }
 
+func noopCallback(_ string) {}
+
 func TestAssignment(t *testing.T) {
-	alloc := New()
-	if err := alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
+	alloc := New(noopCallback)
+	alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
 		"test": {
 			Name:       "test",
 			AutoAssign: true,
@@ -87,8 +124,10 @@ func TestAssignment(t *testing.T) {
 			Name:          "test5",
 			AvoidBuggyIPs: true,
 			AutoAssign:    true,
-			ServiceAllocations: &config.ServiceAllocation{Priority: 20, Namespaces: sets.New("test-ns1"),
-				ServiceSelectors: []labels.Selector{selector("team=metallb")}},
+			ServiceAllocations: &config.ServiceAllocation{
+				Priority: 20, Namespaces: sets.New("test-ns1"),
+				ServiceSelectors: []labels.Selector{selector("team=metallb")},
+			},
 			CIDR: []*net.IPNet{
 				ipnet("1.2.7.0/24"),
 				ipnet("1000::7:0/120"),
@@ -98,16 +137,16 @@ func TestAssignment(t *testing.T) {
 			Name:          "test6",
 			AvoidBuggyIPs: true,
 			AutoAssign:    true,
-			ServiceAllocations: &config.ServiceAllocation{Priority: 20, Namespaces: sets.New("test-ns2"),
-				ServiceSelectors: []labels.Selector{selector("foo=bar")}},
+			ServiceAllocations: &config.ServiceAllocation{
+				Priority: 20, Namespaces: sets.New("test-ns2"),
+				ServiceSelectors: []labels.Selector{selector("foo=bar")},
+			},
 			CIDR: []*net.IPNet{
 				ipnet("1.2.8.0/24"),
 				ipnet("1000::9:0/120"),
 			},
 		},
-	}}); err != nil {
-		t.Fatalf("SetPools: %s", err)
-	}
+	}})
 
 	tests := []struct {
 		desc       string
@@ -647,11 +686,11 @@ func TestAssignment(t *testing.T) {
 }
 
 func TestPoolAllocation(t *testing.T) {
-	alloc := New()
-	// This test only allocates from the "test" pool, so it will run
-	// out of IPs quickly even though there are tons available in
-	// other pools.
-	if err := alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
+	alloc := New(noopCallback)
+	// Majority of this test only allocates from the "test" pool,
+	// so it will run out of IPs quickly even though there are
+	// tons available in other pools.
+	alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
 		"not_this_one": {
 			Name:       "not_this_one",
 			AutoAssign: true,
@@ -672,9 +711,33 @@ func TestPoolAllocation(t *testing.T) {
 			AutoAssign: true,
 			CIDR:       []*net.IPNet{ipnet("10.20.30.0/24"), ipnet("fc00::2:0/120")},
 		},
-	}}); err != nil {
-		t.Fatalf("SetPools: %s", err)
-	}
+		"test-v4": {
+			Name:       "test-v4",
+			AutoAssign: true,
+			CIDR: []*net.IPNet{
+				ipnet("1.2.3.4/31"),
+				ipnet("1.2.3.10/31"),
+			},
+		},
+		"test-v6": {
+			Name:       "test-v6",
+			AutoAssign: true,
+			CIDR: []*net.IPNet{
+				ipnet("1000::/127"),
+				ipnet("2000::/127"),
+			},
+		},
+		"test-dualstack": {
+			Name:       "test-dualstack",
+			AutoAssign: true,
+			CIDR: []*net.IPNet{
+				ipnet("1.2.3.4/31"),
+				ipnet("1.2.3.10/31"),
+				ipnet("1000::/127"),
+				ipnet("2000::/127"),
+			},
+		},
+	}})
 
 	validIP4s := map[string]bool{
 		"1.2.3.4":  true,
@@ -708,6 +771,7 @@ func TestPoolAllocation(t *testing.T) {
 		unassign   bool
 		wantErr    bool
 		ipFamily   ipfamily.Family
+		poolName   string
 	}{
 		{
 			desc:     "s1 gets an IPv4",
@@ -987,72 +1051,72 @@ func TestPoolAllocation(t *testing.T) {
 		{
 			desc:     "s1 gets dual-stack IPs",
 			svcKey:   "s1",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s2 gets dual-stack IPs",
 			svcKey:   "s2",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s3 gets dual-stack IPs",
 			svcKey:   "s3",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s4 gets dual-stack IPs",
 			svcKey:   "s4",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s5 can't get dual-stack IPs",
 			svcKey:   "s5",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 			wantErr:  true,
 		},
 		{
 			desc:     "s6 can't get dual-stack IPs",
 			svcKey:   "s6",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 			wantErr:  true,
 		},
 		{
 			desc:     "s1 releases its dual-stack IPs",
 			svcKey:   "s1",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			unassign: true,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s5 can now grab s1's former dual-stack IPs",
 			svcKey:   "s5",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s6 still can't get dual-stack IPs",
 			svcKey:   "s6",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 			wantErr:  true,
 		},
 		{
 			desc:     "s5 unassigns in prep for enabling dual-stack IPs sharing",
 			svcKey:   "s5",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			unassign: true,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:       "s5 enables dual-stack IP sharing",
 			svcKey:     "s5",
-			svc:        svc,
+			svc:        svcRequireDualStack,
 			ports:      ports("tcp/80"),
 			sharingKey: "share",
 			ipFamily:   ipfamily.DualStack,
@@ -1060,10 +1124,89 @@ func TestPoolAllocation(t *testing.T) {
 		{
 			desc:       "s6 can get an dual-stack IPs now, with sharing",
 			svcKey:     "s6",
-			svc:        svc,
+			svc:        svcRequireDualStack,
 			ports:      ports("tcp/443"),
 			sharingKey: "share",
 			ipFamily:   ipfamily.DualStack,
+		},
+		// Clear old dual-stack addresses
+		{
+			svcKey:   "s1",
+			desc:     "s1 clear old dual-stack address",
+			svc:      svcRequireDualStack,
+			unassign: true,
+			ipFamily: ipfamily.DualStack,
+		},
+		{
+			desc:     "s2 clear old dual-stack address",
+			svcKey:   "s2",
+			svc:      svcRequireDualStack,
+			unassign: true,
+			ipFamily: ipfamily.DualStack,
+		},
+		{
+			desc:     "s3 clear old dual-stack address",
+			svcKey:   "s3",
+			svc:      svcRequireDualStack,
+			unassign: true,
+			ipFamily: ipfamily.DualStack,
+		},
+		{
+			desc:     "s4 clear old ipv6 address",
+			svcKey:   "s4",
+			svc:      svc,
+			unassign: true,
+			ipFamily: ipfamily.DualStack,
+		},
+		{
+			desc:     "s5 clear old dual-stack address",
+			svcKey:   "s5",
+			svc:      svcRequireDualStack,
+			unassign: true,
+			ipFamily: ipfamily.DualStack,
+		},
+		{
+			desc:     "s6 clear old dual-stack address",
+			svcKey:   "s6",
+			svc:      svcRequireDualStack,
+			unassign: true,
+			ipFamily: ipfamily.DualStack,
+		},
+
+		// PreferDualStack tests.
+		{
+			desc:     "s1 gets dual-stack IPs",
+			svcKey:   "s1",
+			svc:      svcPreferDualStack,
+			ipFamily: ipfamily.DualStack,
+		},
+		{
+			desc:     "s2 gets ipv4 IP",
+			svcKey:   "s2",
+			svc:      svcPreferDualStack,
+			ipFamily: ipfamily.IPv4,
+			poolName: "test-v4",
+		},
+		{
+			desc:     "s3 gets ipv6 IP",
+			svcKey:   "s3",
+			svc:      svcPreferDualStack,
+			ipFamily: ipfamily.IPv6,
+			poolName: "test-v6",
+		},
+		{
+			desc:     "s2 clear old ipv4 address",
+			svcKey:   "s2",
+			svc:      svcPreferDualStack,
+			unassign: true,
+			ipFamily: ipfamily.IPv4,
+		},
+		{
+			desc:     "s3 gets dualstack",
+			svcKey:   "s3",
+			svc:      svcPreferDualStack,
+			ipFamily: ipfamily.DualStack,
+			poolName: "test-dualstack",
 		},
 	}
 
@@ -1072,7 +1215,11 @@ func TestPoolAllocation(t *testing.T) {
 			alloc.Unassign(test.svcKey)
 			continue
 		}
-		ips, err := alloc.AllocateFromPool(test.svcKey, test.svc, test.ipFamily, "test", test.ports, test.sharingKey, "")
+		poolName := test.poolName
+		if poolName == "" {
+			poolName = "test"
+		}
+		ips, err := alloc.AllocateFromPool(test.svcKey, test.svc, test.ipFamily, poolName, test.ports, test.sharingKey, "")
 		if test.wantErr {
 			if err == nil {
 				t.Errorf("%s: should have caused an error, but did not", test.desc)
@@ -1102,8 +1249,8 @@ func TestPoolAllocation(t *testing.T) {
 }
 
 func TestAllocation(t *testing.T) {
-	alloc := New()
-	if err := alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
+	alloc := New(noopCallback)
+	alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
 		"test1": {
 			Name:       "test1",
 			AutoAssign: true,
@@ -1114,9 +1261,7 @@ func TestAllocation(t *testing.T) {
 			AutoAssign: true,
 			CIDR:       []*net.IPNet{ipnet("1.2.3.10/31"), ipnet("1000::10/127")},
 		},
-	}}); err != nil {
-		t.Fatalf("SetPools: %s", err)
-	}
+	}})
 
 	validIP4s := map[string]bool{
 		"1.2.3.4":  true,
@@ -1378,51 +1523,51 @@ func TestAllocation(t *testing.T) {
 		{
 			desc:     "s1 gets dual-stack IPs",
 			svcKey:   "s1",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s2 gets dual-stack IPs",
 			svcKey:   "s2",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s3 gets dual-stack IPs",
 			svcKey:   "s3",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s4 gets dual-stack IPs",
 			svcKey:   "s4",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 		},
 		{
 			desc:     "s5 can't get dual-stack IPs",
 			svcKey:   "s5",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 			wantErr:  true,
 		},
 		{
 			desc:     "s6 can't get dual-stack IPs",
 			svcKey:   "s6",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 			wantErr:  true,
 		},
 		{
 			desc:     "s1 gives up its IPs",
 			svcKey:   "s1",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			unassign: true,
 		},
 		{
 			desc:       "s5 can now get dual-stack IPs",
 			svcKey:     "s5",
-			svc:        svc,
+			svc:        svcRequireDualStack,
 			ports:      ports("tcp/80"),
 			sharingKey: "share",
 			ipFamily:   ipfamily.DualStack,
@@ -1430,14 +1575,14 @@ func TestAllocation(t *testing.T) {
 		{
 			desc:     "s6 still can't get dual-stack IPs",
 			svcKey:   "s6",
-			svc:      svc,
+			svc:      svcRequireDualStack,
 			ipFamily: ipfamily.DualStack,
 			wantErr:  true,
 		},
 		{
 			desc:       "s6 can get dual-stack IPs with sharing",
 			svcKey:     "s6",
-			svc:        svc,
+			svc:        svcRequireDualStack,
 			ports:      ports("tcp/443"),
 			sharingKey: "share",
 			ipFamily:   ipfamily.DualStack,
@@ -1475,8 +1620,8 @@ func TestAllocation(t *testing.T) {
 }
 
 func TestBuggyIPs(t *testing.T) {
-	alloc := New()
-	if err := alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
+	alloc := New(noopCallback)
+	alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
 		"test": {
 			Name:       "test",
 			AutoAssign: true,
@@ -1499,9 +1644,7 @@ func TestBuggyIPs(t *testing.T) {
 			AutoAssign:    true,
 			CIDR:          []*net.IPNet{ipnet("1.2.4.254/31")},
 		},
-	}}); err != nil {
-		t.Fatalf("SetPools: %s", err)
-	}
+	}})
 
 	validIPs := map[string]bool{
 		"1.2.3.0":   true,
@@ -1550,27 +1693,11 @@ func TestBuggyIPs(t *testing.T) {
 }
 
 func TestConfigReload(t *testing.T) {
-	alloc := New()
-	if err := alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
-		"test": {
-			Name:       "test",
-			AutoAssign: true,
-			CIDR:       []*net.IPNet{ipnet("1.2.3.0/30"), ipnet("1000::/126")},
-		},
-	}}); err != nil {
-		t.Fatalf("SetPools: %s", err)
-	}
-	if err := alloc.Assign("s1", svc, []net.IP{net.ParseIP("1.2.3.0")}, nil, "", ""); err != nil {
-		t.Fatalf("Assign(s1, 1.2.3.0): %s", err)
-	}
-	if err := alloc.Assign("s2", svc, []net.IP{net.ParseIP("1000::")}, nil, "", ""); err != nil {
-		t.Fatalf("Assign(s2, 1000::): %s", err)
-	}
 	tests := []struct {
-		desc    string
-		pools   map[string]*config.Pool
-		wantErr bool
-		pool    string // Pool that 1.2.3.0 and 1000:: should be in
+		desc   string
+		pools  map[string]*config.Pool
+		poolS1 string // Pool that 1.2.3.0 should be in
+		poolS2 string
 	}{
 		{
 			desc: "set same config is no-op",
@@ -1581,7 +1708,8 @@ func TestConfigReload(t *testing.T) {
 					CIDR:       []*net.IPNet{ipnet("1.2.3.0/30"), ipnet("1000::/126")},
 				},
 			},
-			pool: "test",
+			poolS1: "test",
+			poolS2: "test",
 		},
 		{
 			desc: "expand pool",
@@ -1592,7 +1720,8 @@ func TestConfigReload(t *testing.T) {
 					CIDR:       []*net.IPNet{ipnet("1.2.3.0/24"), ipnet("1000::/120")},
 				},
 			},
-			pool: "test",
+			poolS1: "test",
+			poolS2: "test",
 		},
 		{
 			desc: "shrink pool",
@@ -1603,10 +1732,11 @@ func TestConfigReload(t *testing.T) {
 					CIDR:       []*net.IPNet{ipnet("1.2.3.0/30"), ipnet("1000::/126")},
 				},
 			},
-			pool: "test",
+			poolS1: "test",
+			poolS2: "test",
 		},
 		{
-			desc: "can't shrink further",
+			desc: "can't shrink further, removing the service allocation",
 			pools: map[string]*config.Pool{
 				"test": {
 					Name:       "test",
@@ -1614,11 +1744,11 @@ func TestConfigReload(t *testing.T) {
 					CIDR:       []*net.IPNet{ipnet("1.2.3.2/31"), ipnet("1000::0/126")},
 				},
 			},
-			pool:    "test",
-			wantErr: true,
+			poolS1: "",
+			poolS2: "test",
 		},
 		{
-			desc: "can't shrink further ipv6",
+			desc: "can't shrink further ipv6, removing the service allocation",
 			pools: map[string]*config.Pool{
 				"test": {
 					Name:       "test",
@@ -1626,8 +1756,8 @@ func TestConfigReload(t *testing.T) {
 					CIDR:       []*net.IPNet{ipnet("1.2.3.0/30"), ipnet("1000::2/127")},
 				},
 			},
-			pool:    "test",
-			wantErr: true,
+			poolS1: "test",
+			poolS2: "",
 		},
 		{
 			desc: "rename the pool",
@@ -1638,7 +1768,8 @@ func TestConfigReload(t *testing.T) {
 					CIDR:       []*net.IPNet{ipnet("1.2.3.0/30"), ipnet("1000::0/126")},
 				},
 			},
-			pool: "test2",
+			poolS1: "test2",
+			poolS2: "test2",
 		},
 		{
 			desc: "split pool",
@@ -1646,66 +1777,16 @@ func TestConfigReload(t *testing.T) {
 				"test": {
 					Name:       "test",
 					AutoAssign: true,
-					CIDR:       []*net.IPNet{ipnet("1.2.3.0/31"), ipnet("1000::/127")},
+					CIDR:       []*net.IPNet{ipnet("1.2.3.0/31"), ipnet("1000::2/127")},
 				},
 				"test2": {
 					Name:       "test2",
 					AutoAssign: true,
-					CIDR:       []*net.IPNet{ipnet("1.2.3.2/31"), ipnet("1000::2/127")},
+					CIDR:       []*net.IPNet{ipnet("1.2.3.2/31"), ipnet("1000::/127")},
 				},
 			},
-			pool: "test",
-		},
-		{
-			desc: "swap pool names",
-			pools: map[string]*config.Pool{
-				"test2": {
-					Name:       "test2",
-					AutoAssign: true,
-					CIDR:       []*net.IPNet{ipnet("1.2.3.0/31"), ipnet("1000::/127")},
-				},
-				"test": {
-					Name:       "test",
-					AutoAssign: true,
-					CIDR:       []*net.IPNet{ipnet("1.2.3.2/31"), ipnet("1000::2/127")},
-				},
-			},
-			pool: "test2",
-		},
-		{
-			desc: "delete used pool",
-			pools: map[string]*config.Pool{
-				"test": {
-					Name:       "test",
-					AutoAssign: true,
-					CIDR:       []*net.IPNet{ipnet("1.2.3.2/31"), ipnet("1000::/126")},
-				},
-			},
-			pool:    "test2",
-			wantErr: true,
-		},
-		{
-			desc: "delete used pool ipv6",
-			pools: map[string]*config.Pool{
-				"test": {
-					Name:       "test",
-					AutoAssign: true,
-					CIDR:       []*net.IPNet{ipnet("1.2.3.0/30"), ipnet("1000::2/127")},
-				},
-			},
-			pool:    "test2",
-			wantErr: true,
-		},
-		{
-			desc: "delete unused pool",
-			pools: map[string]*config.Pool{
-				"test2": {
-					Name:       "test2",
-					AutoAssign: true,
-					CIDR:       []*net.IPNet{ipnet("1.2.3.0/31"), ipnet("1000::/127")},
-				},
-			},
-			pool: "test2",
+			poolS1: "test",
+			poolS2: "test2",
 		},
 		{
 			desc: "enable buggy IPs not allowed",
@@ -1717,30 +1798,47 @@ func TestConfigReload(t *testing.T) {
 					CIDR:          []*net.IPNet{ipnet("1.2.3.0/31"), ipnet("1000::/127")},
 				},
 			},
-			pool:    "test2",
-			wantErr: true,
+			poolS1: "",
+			poolS2: "test2",
 		},
 	}
 
 	for _, test := range tests {
-		err := alloc.SetPools(&config.Pools{ByName: test.pools})
-		if test.wantErr {
-			if err == nil {
-				t.Errorf("%q should have failed to SetPools, but succeeded", test.desc)
-			}
-		} else if err != nil {
-			t.Errorf("%q failed to SetPools: %s", test.desc, err)
+		alloc := New(noopCallback)
+		alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
+			"test": {
+				Name:       "test",
+				AutoAssign: true,
+				CIDR:       []*net.IPNet{ipnet("1.2.3.0/30"), ipnet("1000::/126")},
+			},
+			"testunused": {
+				Name:       "unused",
+				AutoAssign: true,
+				CIDR:       []*net.IPNet{ipnet("1.2.4.0/30"), ipnet("1001::/126")},
+			},
+		}})
+		if err := alloc.Assign("s1", svc, []net.IP{net.ParseIP("1.2.3.0")}, nil, "", ""); err != nil {
+			t.Fatalf("Assign(s1, 1.2.3.0): %s", err)
 		}
+		if err := alloc.Assign("s2", svc, []net.IP{net.ParseIP("1000::")}, nil, "", ""); err != nil {
+			t.Fatalf("Assign(s2, 1000::): %s", err)
+		}
+
+		alloc.SetPools(&config.Pools{ByName: test.pools})
 		gotPool := alloc.Pool("s1")
-		if gotPool != test.pool {
-			t.Errorf("%q: s1 is in wrong pool, want %q, got %q", test.desc, test.pool, gotPool)
+		if gotPool != test.poolS1 {
+			t.Errorf("%q: s1 is in wrong pool, want %q, got %q", test.desc, test.poolS1, gotPool)
+		}
+		gotPool = alloc.Pool("s2")
+		if gotPool != test.poolS2 {
+			t.Errorf("%q: s2 is in wrong pool, want %q, got %q", test.desc, test.poolS2, gotPool)
 		}
 	}
 }
 
 func TestAutoAssign(t *testing.T) {
-	alloc := New()
-	if err := alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
+	alloc := New(noopCallback)
+	alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
 		"test1": {
 			Name:       "test1",
 			AutoAssign: false,
@@ -1751,9 +1849,7 @@ func TestAutoAssign(t *testing.T) {
 			AutoAssign: true,
 			CIDR:       []*net.IPNet{ipnet("1.2.3.10/31"), ipnet("1000::10/127")},
 		},
-	}}); err != nil {
-		t.Fatalf("SetPools: %s", err)
-	}
+	}})
 
 	validIP4s := map[string]bool{
 		"1.2.3.4":  false,
@@ -1945,6 +2041,8 @@ func TestPoolCount(t *testing.T) {
 		desc string
 		pool *config.Pool
 		want int64
+		ipv4 int64
+		ipv6 int64
 	}{
 		{
 			desc: "BGP /24",
@@ -1952,6 +2050,8 @@ func TestPoolCount(t *testing.T) {
 				CIDR: []*net.IPNet{ipnet("1.2.3.0/24")},
 			},
 			want: 256,
+			ipv4: 256,
+			ipv6: 0,
 		},
 		{
 			desc: "BGP /24 and /25",
@@ -1959,6 +2059,8 @@ func TestPoolCount(t *testing.T) {
 				CIDR: []*net.IPNet{ipnet("1.2.3.0/24"), ipnet("2.3.4.128/25")},
 			},
 			want: 384,
+			ipv4: 384,
+			ipv6: 0,
 		},
 		{
 			desc: "BGP /24 and /25, no buggy IPs",
@@ -1967,6 +2069,8 @@ func TestPoolCount(t *testing.T) {
 				AvoidBuggyIPs: true,
 			},
 			want: 381,
+			ipv4: 381,
+			ipv6: 0,
 		},
 		{
 			desc: "BGP a BIG ipv6 range",
@@ -1975,20 +2079,40 @@ func TestPoolCount(t *testing.T) {
 				AvoidBuggyIPs: true,
 			},
 			want: math.MaxInt64,
+			ipv4: 381,
+			ipv6: math.MaxInt64,
+		},
+		{
+			desc: "ipv4 and ipv6 range",
+			pool: &config.Pool{
+				CIDR:          []*net.IPNet{ipnet("1.2.3.0/31"), ipnet("1000::/127")},
+				AvoidBuggyIPs: true,
+			},
+			want: 3,
+			ipv4: 1,
+			ipv6: 2,
 		},
 	}
 
 	for _, test := range tests {
-		got := poolCount(test.pool)
-		if test.want != got {
-			t.Errorf("%q: wrong pool count, want %d, got %d", test.desc, test.want, got)
+		total, ipv4, ipv6 := poolCount(test.pool)
+		if test.want != total {
+			t.Errorf("%q: wrong pool total count, want %d, got %d", test.desc, test.want, total)
+		}
+		if test.ipv4 != ipv4 {
+			t.Errorf("%q: wrong pool ipv4 count, want %d, got %d", test.desc, test.ipv4, ipv4)
+		}
+		if test.ipv6 != ipv6 {
+			t.Errorf("%q: wrong pool ipv6 count, want %d, got %d", test.desc, test.ipv6, ipv6)
 		}
 	}
 }
 
 func TestPoolMetrics(t *testing.T) {
-	alloc := New()
-	if err := alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
+	callbackCounter := 0
+	callback := func(_ string) { callbackCounter++ }
+	alloc := New(callback)
+	alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{
 		"test": {
 			Name:       "test",
 			AutoAssign: true,
@@ -1997,9 +2121,7 @@ func TestPoolMetrics(t *testing.T) {
 				ipnet("1000::4/126"),
 			},
 		},
-	}}); err != nil {
-		t.Fatalf("SetPools: %s", err)
-	}
+	}})
 
 	tests := []struct {
 		desc       string
@@ -2093,13 +2215,31 @@ func TestPoolMetrics(t *testing.T) {
 	if int(value) != 8 {
 		t.Errorf("stats.poolCapacity invalid %f. Expected 8", value)
 	}
+	counters := alloc.CountersForPool("test")
+	err := validateCounters(counters, 4, 4, 0, 0)
+	if err != nil {
+		t.Error(err)
+	}
+	expectedCallbackCounter := 1
+	if callbackCounter != expectedCallbackCounter {
+		t.Errorf("callbackCounter invalid %d. Expected %d", callbackCounter, expectedCallbackCounter)
+	}
 
 	for _, test := range tests {
+		expectedCallbackCounter++
 		if len(test.ips) == 0 {
 			alloc.Unassign(test.svcKey)
 			value := ptu.ToFloat64(stats.poolActive.WithLabelValues("test"))
 			if value != test.ipsInUse {
 				t.Errorf("%v; in-use %v. Expected %v", test.desc, value, test.ipsInUse)
+			}
+			counters = alloc.CountersForPool("test")
+			err = validateCounters(counters, 4-int64(test.ipsInUse), 4, int64(test.ipsInUse), 0)
+			if err != nil {
+				t.Error(err)
+			}
+			if callbackCounter != expectedCallbackCounter {
+				t.Errorf("callbackCounter invalid %d. Expected %d", callbackCounter, expectedCallbackCounter)
 			}
 			continue
 		}
@@ -2122,6 +2262,29 @@ func TestPoolMetrics(t *testing.T) {
 		if value != test.ipsInUse {
 			t.Errorf("%v; in-use %v. Expected %v", test.desc, value, test.ipsInUse)
 		}
+		counters = alloc.CountersForPool("test")
+		err = validateCounters(counters, 4-int64(test.ipsInUse), 4, int64(test.ipsInUse), 0)
+		if err != nil {
+			t.Error(err)
+		}
+		if callbackCounter != expectedCallbackCounter {
+			t.Errorf("callbackCounter invalid %d. Expected %d", callbackCounter, expectedCallbackCounter)
+		}
+	}
+	ips := []net.IP{net.ParseIP("1.2.3.4")}
+	err = alloc.Assign("s1", svc, ips, []Port{}, "", "")
+	if err != nil {
+		t.Errorf("assign failed: %v", err)
+	}
+	alloc.SetPools(&config.Pools{ByName: map[string]*config.Pool{}})
+	val := ptu.ToFloat64(stats.poolActive.WithLabelValues("test")) // we actually expect the value to not be there, but since we can't access it this recreates it with 0
+	if val != 0 {
+		t.Errorf("expected value to be 0, got %v", val)
+	}
+	counters = alloc.CountersForPool("test")
+	err = validateCounters(counters, 0, 0, 0, 0)
+	if err != nil {
+		t.Error(err)
 	}
 }
 
@@ -2179,4 +2342,18 @@ func compareIPs(ips1, ips2 []string) bool {
 		}
 	}
 	return true
+}
+
+//nolint:unparam
+func validateCounters(c PoolCounters, avIPv4, avIPv6, asIPv4, asIPv6 int64) error {
+	n := PoolCounters{
+		AvailableIPv4: avIPv4,
+		AvailableIPv6: avIPv6,
+		AssignedIPv4:  asIPv4,
+		AssignedIPv6:  asIPv6,
+	}
+	if !cmp.Equal(c, n) {
+		return fmt.Errorf("unexpected pool counters (-want +got):\n%s", cmp.Diff(n, c))
+	}
+	return nil
 }

@@ -5,9 +5,9 @@ package config
 import (
 	"context"
 
+	frrk8sv1beta1 "github.com/metallb/frr-k8s/api/v1beta1"
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
 	metallbv1beta2 "go.universe.tf/metallb/api/v1beta2"
-	"go.universe.tf/metallb/internal/config"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
@@ -15,8 +15,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+type Resources struct {
+	Pools           []metallbv1beta1.IPAddressPool    `json:"ipaddresspools"`
+	Peers           []metallbv1beta2.BGPPeer          `json:"bgppeers"`
+	BFDProfiles     []metallbv1beta1.BFDProfile       `json:"bfdprofiles"`
+	BGPAdvs         []metallbv1beta1.BGPAdvertisement `json:"bgpadvertisements"`
+	L2Advs          []metallbv1beta1.L2Advertisement  `json:"l2advertisements"`
+	Communities     []metallbv1beta1.Community        `json:"communities"`
+	PasswordSecrets map[string]corev1.Secret          `json:"passwordsecrets"`
+	Nodes           []corev1.Node                     `json:"nodes"`
+	Namespaces      []corev1.Namespace                `json:"namespaces"`
+	BGPExtras       corev1.ConfigMap                  `json:"bgpextras"`
+}
+
 type Updater interface {
-	Update(r config.ClusterResources) error
+	Update(r Resources) error
 	Clean() error
 	Client() client.Client
 	Namespace() string
@@ -42,6 +55,10 @@ func UpdaterForCRs(r *rest.Config, ns string) (Updater, error) {
 		return nil, err
 	}
 
+	if err := frrk8sv1beta1.AddToScheme(myScheme); err != nil {
+		return nil, err
+	}
+
 	cl, err := client.New(r, client.Options{
 		Scheme: myScheme,
 	})
@@ -56,7 +73,7 @@ func UpdaterForCRs(r *rest.Config, ns string) (Updater, error) {
 	}, nil
 }
 
-func (o beta1Updater) Update(r config.ClusterResources) error {
+func (o beta1Updater) Update(r Resources) error {
 	// we fill a map of objects to keep the order we add the resources random, as
 	// it would happen by throwing a set of manifests against a cluster, hoping to
 	// find corner cases that we would not find by adding them always in the same
@@ -100,12 +117,6 @@ func (o beta1Updater) Update(r config.ClusterResources) error {
 		key++
 	}
 
-	for _, legacyPool := range r.LegacyAddressPools {
-		objects[key] = legacyPool.DeepCopy()
-		oldValues[key] = legacyPool.DeepCopy()
-		key++
-	}
-
 	for _, community := range r.Communities {
 		objects[key] = community.DeepCopy()
 		oldValues[key] = community.DeepCopy()
@@ -115,15 +126,12 @@ func (o beta1Updater) Update(r config.ClusterResources) error {
 	// Iterating over the map will return the items in a random order.
 	for i, obj := range objects {
 		obj.SetNamespace(o.namespace)
-		_, err := controllerutil.CreateOrUpdate(context.Background(), o.cli, obj, func() error {
+		_, err := controllerutil.CreateOrPatch(context.Background(), o.cli, obj, func() error {
 			// the mutate function is expected to change the object when updating.
 			// we always override with the old version, and we change only the spec part.
 			switch toChange := obj.(type) {
 			case *metallbv1beta1.IPAddressPool:
 				old := oldValues[i].(*metallbv1beta1.IPAddressPool)
-				toChange.Spec = *old.Spec.DeepCopy()
-			case *metallbv1beta1.AddressPool:
-				old := oldValues[i].(*metallbv1beta1.AddressPool)
 				toChange.Spec = *old.Spec.DeepCopy()
 			case *metallbv1beta1.BFDProfile:
 				old := oldValues[i].(*metallbv1beta1.BFDProfile)
@@ -169,10 +177,6 @@ func (o beta1Updater) Clean() error {
 		return err
 	}
 	err = o.cli.DeleteAllOf(context.Background(), &metallbv1beta1.L2Advertisement{}, client.InNamespace(o.namespace))
-	if err != nil {
-		return err
-	}
-	err = o.cli.DeleteAllOf(context.Background(), &metallbv1beta1.AddressPool{}, client.InNamespace(o.namespace))
 	if err != nil {
 		return err
 	}

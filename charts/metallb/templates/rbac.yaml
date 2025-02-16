@@ -19,15 +19,15 @@ rules:
   resources: ["events"]
   verbs: ["create", "patch"]
 - apiGroups: ["admissionregistration.k8s.io"]
-  resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+  resources: ["validatingwebhookconfigurations"]
   resourceNames: ["metallb-webhook-configuration"]
   verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
 - apiGroups: ["admissionregistration.k8s.io"]
-  resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+  resources: ["validatingwebhookconfigurations"]
   verbs: ["list", "watch"]
 - apiGroups: ["apiextensions.k8s.io"]
   resources: ["customresourcedefinitions"]
-  resourceNames: ["addresspools.metallb.io","bfdprofiles.metallb.io","bgpadvertisements.metallb.io",
+  resourceNames: ["bfdprofiles.metallb.io","bgpadvertisements.metallb.io",
     "bgppeers.metallb.io","ipaddresspools.metallb.io","l2advertisements.metallb.io","communities.metallb.io"]
   verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
 - apiGroups: ["apiextensions.k8s.io"]
@@ -41,6 +41,7 @@ rules:
   resources: ["subjectaccessreviews"]
   verbs: ["create"]
 {{- end }}
+{{- if .Values.speaker.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -58,6 +59,9 @@ rules:
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch"]
+- apiGroups: ["metallb.io"]
+  resources: ["servicel2statuses","servicel2statuses/status"]
+  verbs: ["*"]
 {{- if .Values.prometheus.secureMetricsPort }}
 - apiGroups: ["authentication.k8s.io"]
   resources: ["tokenreviews"]
@@ -66,24 +70,27 @@ rules:
   resources: ["subjectaccessreviews"]
   verbs: ["create"]
 {{- end }}
+{{- if or .Values.frrk8s.enabled .Values.frrk8s.external }}
+- apiGroups: ["frrk8s.metallb.io"]
+  resources: ["frrconfigurations"]
+  verbs: ["get", "list", "watch","create","update","delete"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "metallb.fullname" . }}-pod-lister
+  namespace: {{ .Release.Namespace | quote }}
   labels: {{- include "metallb.labels" . | nindent 4 }}
 rules:
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["list"]
+  verbs: ["list", "get"]
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
   resources: ["configmaps"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["metallb.io"]
-  resources: ["addresspools"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["metallb.io"]
   resources: ["bfdprofiles"]
@@ -103,14 +110,19 @@ rules:
 - apiGroups: ["metallb.io"]
   resources: ["communities"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["metallb.io"]
+  resources: ["servicebgpstatuses","servicebgpstatuses/status"]
+  verbs: ["*"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "metallb.fullname" . }}-controller
+  namespace: {{ .Release.Namespace | quote }}
   labels: {{- include "metallb.labels" . | nindent 4 }}
 rules:
-{{- if .Values.speaker.memberlist.enabled }}
+{{- if and .Values.speaker.enabled .Values.speaker.memberlist.enabled }}
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["create", "get", "list", "watch"]
@@ -127,11 +139,11 @@ rules:
   resources: ["secrets"]
   verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
 - apiGroups: ["metallb.io"]
-  resources: ["addresspools"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["metallb.io"]
   resources: ["ipaddresspools"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["metallb.io"]
+  resources: ["ipaddresspools/status"]
+  verbs: ["update"]
 - apiGroups: ["metallb.io"]
   resources: ["bgppeers"]
   verbs: ["get", "list"]
@@ -162,6 +174,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ template "metallb.fullname" . }}:controller
+{{- if .Values.speaker.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -182,6 +195,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "metallb.fullname" . }}-pod-lister
+  namespace: {{ .Release.Namespace | quote }}
   labels: {{- include "metallb.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -190,11 +204,13 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: {{ include "metallb.speaker.serviceAccountName" . }}
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "metallb.fullname" . }}-controller
+  namespace: {{ .Release.Namespace | quote }}
   labels: {{- include "metallb.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io

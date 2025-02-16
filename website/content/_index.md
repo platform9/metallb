@@ -2,14 +2,14 @@
 title: MetalLB
 ---
 
-# MetalLB
-
 MetalLB is a load-balancer implementation for bare
 metal [Kubernetes](https://kubernetes.io) clusters, using standard
 routing protocols.
 
 {{% notice note %}}
-MetalLB is a young project. You should treat it as a **beta** system.
+Despite the beta status of the project / API, MetalLB is known to be
+stable and reliable.
+
 The [project maturity]({{% relref "concepts/maturity.md" %}}) page
 explains what that implies.
 {{% /notice %}}
@@ -71,7 +71,7 @@ MetalLB implements a FRR Mode that uses an [FRR](https://frrouting.org/) contain
 
 Despite being less battle tested than the native BGP implementation, the FRR mode is currently used by those users that require either BFD or IPV6, and it is the only supported method in the MetalLB version distributed with OpenShift. The long term plan is to make it the only BGP implementation available in MetalLB.
 
-Please see the [installation](https://metallb.universe.tf/installation/) section for instructions on how to enable it.
+Please see the [installation](https://metallb.io/installation/) section for instructions on how to enable it.
 
 ## Contributing
 
@@ -85,4 +85,5 @@ to
 which will give us warm fuzzy feelings :).
 
 We are a [Cloud Native Computing Foundation](https://cncf.io/) sandbox project.
+
 ![cncf](/images/cncf-color.png)

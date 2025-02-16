@@ -53,7 +53,7 @@ to announce service IPs. Jump to:
 - [BGP configuration](#bgp-configuration)
 - [Advanced BGP configuration](./_advanced_bgp_configuration)
 - [Advanced L2 configuration](./_advanced_l2_configuration)
-- [Advanced IPAddressPool configuration](./_advanced_ipaddresspool_config/)
+- [Advanced IPAddressPool configuration](./_advanced_ipaddresspool_configuration)
 
 Note: it is possible to announce the same service both via L2 and via BGP (see the relative
 [FAQ](../faq/_index.md)).
@@ -118,6 +118,10 @@ or more external BGP routers.
 
 In order to do so, an instance of `BGPPeer` must be created for each
 router we want metallb to connect to.
+
+{{% notice note %}}
+The BGPPeer v1beta1 version is deprecated. Please consider using v1beta2.
+{{% /notice %}}
 
 For a basic configuration featuring one BGP router and one IP address
 range, you need 4 pieces of information:

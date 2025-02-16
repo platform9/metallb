@@ -116,7 +116,7 @@ To develop MetalLB, you'll need a couple of pieces of software:
   running system
 - [kind](https://github.com/kubernetes-sigs/kind), a lightweight Kubernetes cluster running in Docker
 - [Kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/), the Kubernetes commandline interface
-- [Invoke](https://www.pyinvoke.org) to drive the build system
+- Install python dependencies with command `pip3 install -r dev-env/requirements.txt`
 
 >NOTE: The development environment was tested with **kind `v0.9.0`**. Older
 >versions may not work since there have been breaking changes between minor
@@ -165,10 +165,12 @@ The following are our commit message guidelines:
 
 When adding a new feature, or modifying a current one, consider adding a new test
 to the test suite located in `/e2etest`.
+Each feature should come with enough unit test / end to end coverage to make
+us confident of the change.
 
 ## The website
 
-The website at <https://metallb.universe.tf> is pinned to the latest
+The website at <https://metallb.io> is pinned to the latest
 released version, so that users who don't care about ongoing
 development see documentation that is consistent with the released
 code.

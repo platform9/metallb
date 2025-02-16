@@ -13,17 +13,51 @@ Are you actually ready to release? Check the milestone on github and
 verify that all its issues are closed. If there are open issues,
 you'll have to either resolve them, or bump to the next version.
 
+### Merge the main branch
 
-### Cherry-pick relevant commits
-
-MetalLB uses release branches to track releases. Relevant commits should be cherry-picked onto the release branch.
+MetalLB uses release branches to track releases. In case a new release is cut as a mirror of main, merge can
+be used.
 For example:
+
+```bash
+git checkout v0.9
+git merge main
+git push
+```
+
+#### Using cherry picks
+
+In case only a subset of the changes are brought to the new release, cherry-pick
+must be used.
 
 ```bash
 git checkout v0.9
 git cherry-pick -x f1f86ed658c1e8a6f90f967ed94881d61476b4c0
 git push
 ```
+
+Note that this will break the release notes generator. If this fix is a backport, please
+consider filing a backport PR.
+
+### Generate the release notes
+
+A convenience generator script is added under `website/gen_relnotes.sh`. The syntax is
+as follows:
+
+```bash
+website/gen_relnotes.sh <branch> <first commit> <last commit>
+```
+
+Where branch is the branch being released, first and last commit is the interval
+we want to generate the release notes for.
+
+The `GITHUB_TOKEN` environment variable must be set with a github token which has the following permissions:
+
+Read access to:
+
+- Contents
+- Pull requests
+- Commit statuses
 
 ### Finalize release notes
 
@@ -34,7 +68,7 @@ bugfixes (e.g. security issues, long-term pain point resolved), point
 those out as well.
 
 Also update the documentation link so that the soon-to-be latest
-release's documentation link points to `metallb.universe.tf`, and the
+release's documentation link points to `metallb.io`, and the
 previous releases point to `vX-Y-Z--metallb.netlify.com`, which is the
 website pinned at that tagged release.
 
@@ -88,20 +122,20 @@ website.
 
 ### Wait for the image repositories to update
 
-When you pushed, CircleCI kicked off a set of image builds for the new
+When you pushed, CI kicked off a set of image builds for the new
 tag. You need to wait for these images to be pushed live before
 continuing, because the manifests for the new release point to image
-tags that don't exist until CircleCI makes them exist.
+tags that don't exist until CI makes them exist.
 
 Check on Quay for a `vX.Y.Z` tag on each image, or check on
-CircleCI that the deploy has completed.
+CI that the deploy has completed.
 
 ### Repoint the live website
 
 Move the `live-website` branch to the newly created tag with `git
 branch -f live-website vX.Y.Z`, then force-push the branch with `git
 push -f origin live-website`. This will trigger Netlify to
-redeploy [metallb.universe.tf](https://metallb.universe.tf) with
+redeploy [metallb.io](https://metallb.io) with
 updated documentation for the new version.
 
 ### Update Slack

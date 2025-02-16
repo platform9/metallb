@@ -24,6 +24,7 @@ spec:
       - args:
         - --port=7472
         - --log-level=info
+        - --tls-min-version=VersionTLS12
         env:
         - name: METALLB_ML_SECRET_NAME
           value: memberlist
@@ -77,4 +78,4 @@ spec:
       - name: cert
         secret:
           defaultMode: 420
-          secretName: webhook-server-cert
+          secretName: metallb-webhook-cert

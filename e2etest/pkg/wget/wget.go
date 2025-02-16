@@ -3,10 +3,11 @@
 package wget
 
 import (
+	"fmt"
 	"os/exec"
 
-	"go.universe.tf/metallb/e2etest/pkg/executor"
-	"k8s.io/kubernetes/test/e2e/framework"
+	"github.com/onsi/ginkgo/v2"
+	"go.universe.tf/e2etest/pkg/executor"
 )
 
 const (
@@ -15,24 +16,30 @@ const (
 )
 
 func Do(address string, exc executor.Executor) error {
-	retrycnt := 0
-	var code int
-	var err error
+	var (
+		code     int
+		err      error
+		out      string
+		retrycnt = 0
+	)
 
 	// Retry loop to handle wget NetworkFailure errors
 	for {
-		_, err = exc.Exec("wget", "-O-", "-q", address, "-T", "60")
+		out, err = exc.Exec("wget", "-O-", "-q", address, "-T", "5")
 		if exitErr, ok := err.(*exec.ExitError); err != nil && ok {
 			code = exitErr.ExitCode()
 		} else {
 			break
 		}
 		if retrycnt < retryLimit && code == NetworkFailure {
-			framework.Logf(" wget failed with code %d, err %s retrycnt %d\n", code, err, retrycnt)
+			ginkgo.GinkgoWriter.Printf(" wget failed with code %d, err %s retrycnt %d\n", code, err, retrycnt)
 			retrycnt++
 		} else {
 			break
 		}
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, out)
+	}
+	return nil
 }

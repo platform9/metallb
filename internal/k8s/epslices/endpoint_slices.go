@@ -5,34 +5,21 @@ package epslices
 import (
 	"fmt"
 
-	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-type EpsOrSlices struct {
-	Type      EpsOrSliceType
-	EpVal     *v1.Endpoints
-	SlicesVal []discovery.EndpointSlice
-}
-
-type EpsOrSliceType int
-
-const (
-	Unknown EpsOrSliceType = iota
-	Eps
-	Slices
-)
-
 const SlicesServiceIndexName = "ServiceName"
 
-// IsConditionReady tells if the conditions represent a ready state, interpreting
-// nil ready as ready.
-func IsConditionReady(conditions discovery.EndpointConditions) bool {
-	if conditions.Ready == nil {
+// EndpointCanServe tells if the conditions represent a ready state or serving state is ready.
+func EndpointCanServe(conditions discovery.EndpointConditions) bool {
+	if conditions.Ready == nil || *conditions.Ready {
 		return true
 	}
-	return *conditions.Ready
+	if conditions.Serving != nil && *conditions.Serving {
+		return true
+	}
+	return false
 }
 
 func ServiceKeyForSlice(endpointSlice *discovery.EndpointSlice) (types.NamespacedName, error) {

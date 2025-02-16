@@ -1,17 +1,16 @@
 {{- define "localpreffilter" -}}
-{{frrIPFamily .advertisement.IPFamily}} prefix-list {{localPrefPrefixList .neighbor .advertisement.LocalPref}} permit {{.advertisement.Prefix}}
-route-map {{.neighbor.ID}}-out permit {{counter .neighbor.ID}}
-  match {{frrIPFamily .advertisement.IPFamily}} address prefix-list {{localPrefPrefixList .neighbor .advertisement.LocalPref}}
-  set local-preference {{.advertisement.LocalPref}}
-  on-match next
+{{$localPrefixListName :=localPrefPrefixList .neighbor .advertisement.LocalPref -}}
+{{frrIPFamily .advertisement.IPFamily}} prefix-list {{$localPrefixListName}} seq {{counter $localPrefixListName}} permit {{.advertisement.Prefix}}
 {{- end -}}
 
 {{- define "communityfilter" -}}
-{{frrIPFamily .advertisement.IPFamily}} prefix-list {{communityPrefixList .neighbor .community}} permit {{.advertisement.Prefix}}
-route-map {{.neighbor.ID}}-out permit {{counter .neighbor.ID}}
-  match {{frrIPFamily .advertisement.IPFamily}} address prefix-list {{communityPrefixList .neighbor .community}}
-  set community {{.community}} additive
-  on-match next
+{{$communityPrefixlistName :=communityPrefixList .neighbor .community -}}
+{{frrIPFamily .advertisement.IPFamily}} prefix-list {{$communityPrefixlistName}} seq {{counter $communityPrefixlistName}} permit {{.advertisement.Prefix}}
+{{- end -}}
+
+{{- define "largecommunityfilter" -}}
+{{$largeCommunityPrefixlistName :=largeCommunityPrefixList .neighbor .largecommunity -}}
+{{frrIPFamily .advertisement.IPFamily}} prefix-list {{largeCommunityPrefixList .neighbor .largecommunity}} seq {{counter $largeCommunityPrefixlistName}} permit {{.advertisement.Prefix}}
 {{- end -}}
 
 {{- /* The prefixes are per router in FRR, but MetalLB api allows to associate a given BGPAdvertisement to a service IP,
@@ -21,6 +20,49 @@ route-map {{.neighbor.ID}}-out permit {{counter .neighbor.ID}}
 {{- define "neighborfilters" -}}
 
 route-map {{.neighbor.ID}}-in deny 20
+
+{{- range $c := .neighbor.LocalPrefsV4 }}
+route-map {{$.neighbor.ID}}-out permit {{counter $.neighbor.ID}}
+  match ip address prefix-list {{localPrefPrefixList $.neighbor . }}
+  set local-preference {{.}}
+  on-match next
+{{- end -}}
+
+{{- range $c := .neighbor.LocalPrefsV6 }}
+route-map {{$.neighbor.ID}}-out permit {{counter $.neighbor.ID}}
+  match ipv6 address prefix-list {{localPrefPrefixList $.neighbor . }}
+  set local-preference {{.}}
+  on-match next
+{{- end -}}
+
+{{- range $c := .neighbor.LargeCommunitiesV4 }}
+route-map {{$.neighbor.ID}}-out permit {{counter $.neighbor.ID}}
+  match ip address prefix-list {{largeCommunityPrefixList $.neighbor .}}
+  set large-community {{.}} additive
+  on-match next
+{{- end -}}
+
+{{- range $c := .neighbor.LargeCommunitiesV6 }}
+route-map {{$.neighbor.ID}}-out permit {{counter $.neighbor.ID}}
+  match ipv6 address prefix-list {{largeCommunityPrefixList $.neighbor .}}
+  set large-community {{.}} additive
+  on-match next
+{{- end -}}
+
+{{- range $c := .neighbor.CommunitiesV4 }}
+route-map {{$.neighbor.ID}}-out permit {{counter $.neighbor.ID}}
+  match ip address prefix-list {{communityPrefixList $.neighbor .}}
+  set community {{.}} additive
+  on-match next
+{{- end -}}
+
+{{- range $c := .neighbor.CommunitiesV6 }}
+route-map {{$.neighbor.ID}}-out permit {{counter $.neighbor.ID}}
+  match ipv6 address prefix-list {{communityPrefixList $.neighbor .}}
+  set community {{.}} additive
+  on-match next
+{{- end -}}
+
 {{- range $a := .neighbor.Advertisements }}
 {{/* Advertisements for which we must enable set the local pref */}}
 {{- if not (eq $a.LocalPref 0)}}
@@ -31,8 +73,23 @@ route-map {{.neighbor.ID}}-in deny 20
 {{- range $c := $a.Communities }}
 {{template "communityfilter" dict "advertisement" $a "neighbor" $.neighbor "community" $c}}
 {{- end }}
+{{- range $lc := $a.LargeCommunities }}
+{{template "largecommunityfilter" dict "advertisement" $a "neighbor" $.neighbor "largecommunity" $lc}}
+{{- end }}
 {{/* this advertisement is allowed to the specific neighbor  */}}
-{{frrIPFamily $a.IPFamily}} prefix-list {{allowedPrefixList $.neighbor}} permit {{$a.Prefix}}
+{{$plistName:=allowedPrefixList $.neighbor}}
+{{frrIPFamily $a.IPFamily}} prefix-list {{$plistName}} seq {{counter $plistName}} permit {{$a.Prefix}}
+{{- end }}
+
+
+{{/* If the neighbor does not have an advertisement, we need to add a prefix to deny
+for when we have a prefix but a given peer is not selected for any prefixes */}}
+{{$plistName:=allowedPrefixList $.neighbor}}
+{{- if not .neighbor.HasV4Advertisements}}
+ip prefix-list {{$plistName}} seq {{counter $plistName}} deny any
+{{- end }}
+{{- if not .neighbor.HasV6Advertisements}}
+ipv6 prefix-list {{$plistName}} seq {{counter $plistName}} deny any
 {{- end }}
 
 route-map {{$.neighbor.ID}}-out permit {{counter $.neighbor.ID}}
@@ -40,12 +97,4 @@ route-map {{$.neighbor.ID}}-out permit {{counter $.neighbor.ID}}
 route-map {{$.neighbor.ID}}-out permit {{counter $.neighbor.ID}}
   match ipv6 address prefix-list {{allowedPrefixList $.neighbor}}
 
-{{/* If the neighbor does not have an advertisement, we need to add a prefix to deny
-for when we have a prefix but a given peer is not selected for any prefixes */}}
-{{- if not .neighbor.HasV4Advertisements}}
-ip prefix-list {{allowedPrefixList $.neighbor }} deny any
-{{- end }}
-{{- if not .neighbor.HasV6Advertisements}}
-ipv6 prefix-list {{allowedPrefixList $.neighbor}} deny any
-{{- end -}}
 {{- end -}}

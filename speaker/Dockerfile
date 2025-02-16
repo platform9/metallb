@@ -1,52 +1,58 @@
 # syntax=docker/dockerfile:1.2
 
-FROM --platform=$BUILDPLATFORM docker.io/golang:1.19.5 AS builder
-ARG GIT_COMMIT=dev
-ARG GIT_BRANCH=dev
+FROM --platform=$BUILDPLATFORM docker.io/golang:1.23.6 AS builder
 WORKDIR $GOPATH/go.universe.tf/metallb
 
-# Cache the downloads
-COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod/ \
+  --mount=type=bind,source=go.sum,target=go.sum \
+  --mount=type=bind,source=go.mod,target=go.mod \
+  go mod download -x
 
-# Copy speaker
-COPY speaker/*.go speaker/
-# Copy frr-metrics
-COPY frr-tools/metrics ./frr-tools/metrics/
-# COPY internals
-COPY internal internal
-COPY api api
-
+ARG GIT_COMMIT=dev
+ARG GIT_BRANCH=dev
 ARG TARGETARCH
 ARG TARGETOS
 ARG TARGETPLATFORM
 
-# have to manually convert as building the different arms can cause issues
 # Extract variant
+# have to manually convert as building the different arms can cause issues
 RUN case ${TARGETPLATFORM} in \
   "linux/arm/v6") export VARIANT="6" ;; \
   "linux/arm/v7") export VARIANT="7" ;; \
   *) export VARIANT="" ;; \
   esac
 
-# Cache builds directory for faster rebuild
 RUN --mount=type=cache,target=/root/.cache/go-build \
-  --mount=type=cache,target=/go/pkg \
+  --mount=type=cache,target=/go/pkg/mod \
+  --mount=type=bind,source=go.sum,target=go.sum \
+  --mount=type=bind,source=go.mod,target=go.mod \
+  --mount=type=bind,source=internal,target=internal \
+  --mount=type=bind,source=api,target=api \
+  --mount=type=bind,source=speaker,target=speaker \
+  --mount=type=bind,source=frr-tools/metrics,target=frr-tools/metrics \
+  --mount=type=bind,source=frr-tools/cp-tool,target=frr-tools/cp-tool \
   # build frr metrics
   CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$VARIANT \
   go build -v -o /build/frr-metrics \
   -ldflags "-X 'go.universe.tf/metallb/internal/version.gitCommit=${GIT_COMMIT}' -X 'go.universe.tf/metallb/internal/version.gitBranch=${GIT_BRANCH}'" \
   frr-tools/metrics/exporter.go \
   && \
+  #build cp-tool
+  CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$VARIANT \
+  go build -v -o /build/cp-tool \
+  -ldflags "-X 'go.universe.tf/metallb/internal/version.gitCommit=${GIT_COMMIT}' -X 'go.universe.tf/metallb/internal/version.gitBranch=${GIT_BRANCH}'" \
+  frr-tools/cp-tool/cp-tool.go \
+  && \
   # build speaker
   CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$VARIANT \
   go build -v -o /build/speaker \
   -ldflags "-X 'go.universe.tf/metallb/internal/version.gitCommit=${GIT_COMMIT}' -X 'go.universe.tf/metallb/internal/version.gitBranch=${GIT_BRANCH}'" \
-  go.universe.tf/metallb/speaker
+  ./speaker
 
-FROM docker.io/alpine:latest
+FROM gcr.io/distroless/static:latest
 
 
+COPY --from=builder /build/cp-tool /cp-tool
 COPY --from=builder /build/speaker /speaker
 COPY --from=builder /build/frr-metrics /frr-metrics
 COPY frr-tools/reloader/frr-reloader.sh /frr-reloader.sh
@@ -60,6 +66,6 @@ LABEL org.opencontainers.image.authors="metallb" \
   org.opencontainers.image.licenses="Apache-2.0" \
   org.opencontainers.image.description="Metallb speaker" \
   org.opencontainers.image.title="speaker" \
-  org.opencontainers.image.base.name="docker.io/alpine:latest"
+  org.opencontainers.image.base.name="gcr.io/distroless/static:latest"
 
 ENTRYPOINT ["/speaker"]

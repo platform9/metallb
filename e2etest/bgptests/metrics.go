@@ -9,26 +9,24 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.universe.tf/e2etest/pkg/config"
+	frrconfig "go.universe.tf/e2etest/pkg/frr/config"
+	frrcontainer "go.universe.tf/e2etest/pkg/frr/container"
+	"go.universe.tf/e2etest/pkg/ipfamily"
+	"go.universe.tf/e2etest/pkg/k8s"
+	"go.universe.tf/e2etest/pkg/k8sclient"
+	"go.universe.tf/e2etest/pkg/metallb"
+	"go.universe.tf/e2etest/pkg/metrics"
+	testservice "go.universe.tf/e2etest/pkg/service"
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
-	frrconfig "go.universe.tf/metallb/e2etest/pkg/frr/config"
-	frrcontainer "go.universe.tf/metallb/e2etest/pkg/frr/container"
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	"go.universe.tf/metallb/e2etest/pkg/metallb"
-	"go.universe.tf/metallb/e2etest/pkg/metrics"
-	testservice "go.universe.tf/metallb/e2etest/pkg/service"
-	metallbconfig "go.universe.tf/metallb/internal/config"
-	"go.universe.tf/metallb/internal/ipfamily"
-	"go.universe.tf/metallb/internal/pointer"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/kubernetes/test/e2e/framework"
-	admissionapi "k8s.io/pod-security-admission/api"
+	"k8s.io/utils/ptr"
 )
 
 var _ = ginkgo.Describe("BGP metrics", func() {
 	var cs clientset.Interface
-	var f *framework.Framework
 
 	emptyBGPAdvertisement := metallbv1beta1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
@@ -36,30 +34,33 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 		},
 	}
 
+	testNamespace := ""
 	ginkgo.AfterEach(func() {
 		if ginkgo.CurrentSpecReport().Failed() {
-			dumpBGPInfo(ReportPath, ginkgo.CurrentSpecReport().LeafNodeText, cs, f)
+			dumpBGPInfo(ReportPath, ginkgo.CurrentSpecReport().LeafNodeText, cs, testNamespace)
 			k8s.DumpInfo(Reporter, ginkgo.CurrentSpecReport().LeafNodeText)
 		}
+		err := k8s.DeleteNamespace(cs, testNamespace)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	ginkgo.BeforeEach(func() {
 		ginkgo.By("Clearing any previous configuration")
 
 		err := ConfigUpdater.Clean()
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 
 		for _, c := range FRRContainers {
 			err := c.UpdateBGPConfigFile(frrconfig.Empty)
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 		}
+
+		cs = k8sclient.New()
+		testNamespace, err = k8s.CreateTestNamespace(cs, "bgp")
+		Expect(err).NotTo(HaveOccurred())
 	})
 
-	f = framework.NewDefaultFramework("bgp")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
-
 	ginkgo.BeforeEach(func() {
-		cs = f.ClientSet
 		var frrContainersForAdvertisement []*frrcontainer.FRR
 		for _, c := range FRRContainers {
 			// Connectivity between a multi hop FRR container to a BGP peer is going through
@@ -75,7 +76,6 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 		if len(frrContainersForAdvertisement) < 2 {
 			ginkgo.Skip("This test requires 2 external frr containers")
 		}
-
 	})
 
 	ginkgo.Context("metrics", func() {
@@ -86,17 +86,17 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 		ginkgo.BeforeEach(func() {
 			var err error
 			controllerPod, err = metallb.ControllerPod(cs)
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 			speakerPods, err = metallb.SpeakerPods(cs)
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 			promPod, err = metrics.PrometheusPod(cs, PrometheusNamespace)
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		ginkgo.DescribeTable("should collect BGP metrics in FRR mode", func(ipFamily ipfamily.Family, poolAddress string, addressTotal int) {
 			poolName := "bgp-test"
 
-			resources := metallbconfig.ClusterResources{
+			resources := config.Resources{
 				Pools: []metallbv1beta1.IPAddressPool{
 					{
 						ObjectMeta: metav1.ObjectMeta{
@@ -113,18 +113,18 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 
 			for _, c := range FRRContainers {
 				err := frrcontainer.PairWithNodes(cs, c, ipFamily)
-				framework.ExpectNoError(err)
+				Expect(err).NotTo(HaveOccurred())
 			}
 
 			err := ConfigUpdater.Update(resources)
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 
 			for _, c := range FRRContainers {
 				validateFRRPeeredWithAllNodes(cs, c, ipFamily)
 			}
 
 			ginkgo.By("creating a service")
-			svc, _ := testservice.CreateWithBackend(cs, f.Namespace.Name, "external-local-lb", testservice.TrafficPolicyCluster) // Is a sleep required here?
+			svc, _ := testservice.CreateWithBackend(cs, testNamespace, "external-local-lb", testservice.TrafficPolicyCluster) // Is a sleep required here?
 			defer testservice.Delete(cs, svc)
 
 			selectors := labelsForPeers(FRRContainers, ipFamily)
@@ -132,12 +132,17 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 			for _, speaker := range speakerPods {
 				ginkgo.By(fmt.Sprintf("checking speaker %s", speaker.Name))
 				Eventually(func() error {
-					speakerMetrics, err := metrics.ForPod(controllerPod, speaker, metallb.Namespace)
+					metricsPod, metricsPrefix, err := FRRProvider.BGPMetricsPodFor(speaker.Namespace, speaker.Name)
+					if err != nil {
+						return err
+					}
+
+					speakerMetrics, err := metrics.ForPod(promPod, metricsPod, metallb.Namespace)
 					if err != nil {
 						return err
 					}
 					for _, selector := range selectors {
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), "metallb_bgp_opens_sent", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), fmt.Sprintf("%s_bgp_opens_sent", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -147,7 +152,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), "metallb_bgp_opens_received", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), fmt.Sprintf("%s_bgp_opens_received", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -157,7 +162,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), "metallb_bgp_updates_total_received", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), fmt.Sprintf("%s_bgp_updates_total_received", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -167,7 +172,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), "metallb_bgp_keepalives_sent", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), fmt.Sprintf("%s_bgp_keepalives_sent", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -177,7 +182,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), "metallb_bgp_keepalives_received", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), fmt.Sprintf("%s_bgp_keepalives_received", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -187,7 +192,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), "metallb_bgp_route_refresh_sent", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), fmt.Sprintf("%s_bgp_route_refresh_sent", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -197,7 +202,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), "metallb_bgp_total_sent", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), fmt.Sprintf("%s_bgp_total_sent", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -207,7 +212,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), "metallb_bgp_total_received", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(0), fmt.Sprintf("%s_bgp_total_received", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -218,7 +223,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						}
 					}
 					return nil
-				}, 2*time.Minute, 1*time.Second).Should(BeNil())
+				}, 2*time.Minute, 1*time.Second).ShouldNot(HaveOccurred())
 			}
 		},
 			ginkgo.Entry("IPV4 - Checking service", ipfamily.IPv4, v4PoolAddresses, 256),
@@ -235,10 +240,13 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 					address = c.Ipv6
 				}
 				peerAddr := address + fmt.Sprintf(":%d", c.RouterConfig.BGPPort)
+				if FRRProvider != nil && FRRProvider.FRRK8sBased() {
+					peerAddr = address
+				}
 				peerAddrToName[peerAddr] = c.Name
 			}
 
-			resources := metallbconfig.ClusterResources{
+			resources := config.Resources{
 				Pools: []metallbv1beta1.IPAddressPool{
 					{
 						ObjectMeta: metav1.ObjectMeta{
@@ -255,11 +263,11 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 
 			for _, c := range FRRContainers {
 				err := frrcontainer.PairWithNodes(cs, c, ipFamily)
-				framework.ExpectNoError(err)
+				Expect(err).NotTo(HaveOccurred())
 			}
 
 			err := ConfigUpdater.Update(resources)
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 
 			for _, c := range FRRContainers {
 				validateFRRPeeredWithAllNodes(cs, c, ipFamily)
@@ -267,7 +275,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 
 			ginkgo.By("checking the metrics when no service is added")
 			Eventually(func() error {
-				controllerMetrics, err := metrics.ForPod(controllerPod, controllerPod, metallb.Namespace)
+				controllerMetrics, err := metrics.ForPod(promPod, controllerPod, metallb.Namespace)
 				if err != nil {
 					return err
 				}
@@ -288,20 +296,34 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 					return err
 				}
 				return nil
-			}, 2*time.Minute, 1*time.Second).Should(BeNil())
+			}, 2*time.Minute, 1*time.Second).ShouldNot(HaveOccurred())
 
 			selectors := labelsForPeers(FRRContainers, ipFamily)
+
+			// This is the only test where the same bgp metrics can be from either
+			// the speaker container or frr depending on the deployment's bgp mode.
+			bgpMetricsPodForSpeaker := func(p *corev1.Pod) (*corev1.Pod, string, error) {
+				if FRRProvider == nil {
+					return p, "metallb", nil
+				}
+				return FRRProvider.BGPMetricsPodFor(p.Namespace, p.Name)
+			}
 
 			for _, speaker := range speakerPods {
 				ginkgo.By(fmt.Sprintf("checking speaker %s", speaker.Name))
 
 				Eventually(func() error {
-					speakerMetrics, err := metrics.ForPod(controllerPod, speaker, metallb.Namespace)
+					metricsPod, metricsPrefix, err := bgpMetricsPodForSpeaker(speaker)
+					if err != nil {
+						return err
+					}
+
+					speakerMetrics, err := metrics.ForPod(promPod, metricsPod, metallb.Namespace)
 					if err != nil {
 						return err
 					}
 					for _, selector := range selectors {
-						err = metrics.ValidateGaugeValue(1, "metallb_bgp_session_up", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateGaugeValue(1, fmt.Sprintf("%s_bgp_session_up", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -309,7 +331,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						if err != nil {
 							return err
 						}
-						err = metrics.ValidateGaugeValue(0, "metallb_bgp_announced_prefixes_total", selector.labelsBGP, speakerMetrics)
+						err = metrics.ValidateGaugeValue(0, fmt.Sprintf("%s_bgp_announced_prefixes_total", metricsPrefix), selector.labelsBGP, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -319,16 +341,16 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						}
 					}
 					return nil
-				}, 2*time.Minute, 1*time.Second).Should(BeNil())
+				}, 2*time.Minute, 1*time.Second).ShouldNot(HaveOccurred())
 			}
 
 			ginkgo.By("creating a service")
-			svc, _ := testservice.CreateWithBackend(cs, f.Namespace.Name, "external-local-lb", testservice.TrafficPolicyCluster) // Is a sleep required here?
+			svc, _ := testservice.CreateWithBackend(cs, testNamespace, "external-local-lb", testservice.TrafficPolicyCluster) // Is a sleep required here?
 			defer testservice.Delete(cs, svc)
 
 			ginkgo.By("checking the metrics when a service is added")
 			Eventually(func() error {
-				controllerMetrics, err := metrics.ForPod(controllerPod, controllerPod, metallb.Namespace)
+				controllerMetrics, err := metrics.ForPod(promPod, controllerPod, metallb.Namespace)
 				if err != nil {
 					return err
 				}
@@ -341,18 +363,29 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 					return err
 				}
 				return nil
-			}, 2*time.Minute, 1*time.Second).Should(BeNil())
+			}, 2*time.Minute, 1*time.Second).ShouldNot(HaveOccurred())
 
 			for _, speaker := range speakerPods {
 				ginkgo.By(fmt.Sprintf("checking speaker %s", speaker.Name))
 
 				Eventually(func() error {
-					speakerMetrics, err := metrics.ForPod(controllerPod, speaker, metallb.Namespace)
+					bgpMetricsPod, metricsPrefix, err := bgpMetricsPodForSpeaker(speaker)
 					if err != nil {
 						return err
 					}
+
+					bgpMetrics, err := metrics.ForPod(promPod, bgpMetricsPod, metallb.Namespace)
+					if err != nil {
+						return err
+					}
+
+					speakerMetrics, err := metrics.ForPod(promPod, speaker, metallb.Namespace)
+					if err != nil {
+						return err
+					}
+
 					for addr := range peerAddrToName {
-						err = metrics.ValidateGaugeValue(1, "metallb_bgp_session_up", map[string]string{"peer": addr}, speakerMetrics)
+						err = metrics.ValidateGaugeValue(1, fmt.Sprintf("%s_bgp_session_up", metricsPrefix), map[string]string{"peer": addr}, bgpMetrics)
 						if err != nil {
 							return err
 						}
@@ -361,7 +394,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateGaugeValue(1, "metallb_bgp_announced_prefixes_total", map[string]string{"peer": addr}, speakerMetrics)
+						err = metrics.ValidateGaugeValue(1, fmt.Sprintf("%s_bgp_announced_prefixes_total", metricsPrefix), map[string]string{"peer": addr}, bgpMetrics)
 						if err != nil {
 							return err
 						}
@@ -370,7 +403,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), "metallb_bgp_updates_total", map[string]string{"peer": addr}, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), fmt.Sprintf("%s_bgp_updates_total", metricsPrefix), map[string]string{"peer": addr}, bgpMetrics)
 						if err != nil {
 							return err
 						}
@@ -380,12 +413,12 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						}
 					}
 
-					err = metrics.ValidateGaugeValue(1, "metallb_speaker_announced", map[string]string{"node": speaker.Spec.NodeName, "protocol": "bgp", "service": fmt.Sprintf("%s/%s", f.Namespace.Name, svc.Name)}, speakerMetrics)
+					err = metrics.ValidateGaugeValue(1, "metallb_speaker_announced", map[string]string{"node": speaker.Spec.NodeName, "protocol": "bgp", "service": fmt.Sprintf("%s/%s", testNamespace, svc.Name)}, speakerMetrics)
 					if err != nil {
 						return err
 					}
 					return nil
-				}, 2*time.Minute, 1*time.Second).Should(BeNil())
+				}, 2*time.Minute, 1*time.Second).ShouldNot(HaveOccurred())
 			}
 		},
 			ginkgo.Entry("IPV4 - Checking service", ipfamily.IPv4, v4PoolAddresses, 256),
@@ -393,7 +426,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 	})
 
 	ginkgo.DescribeTable("BFD metrics from FRR", func(bfd metallbv1beta1.BFDProfile, pairingFamily ipfamily.Family, poolAddresses []string) {
-		resources := metallbconfig.ClusterResources{
+		resources := config.Resources{
 			Pools: []metallbv1beta1.IPAddressPool{
 				{
 					ObjectMeta: metav1.ObjectMeta{
@@ -410,13 +443,13 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 		}
 
 		err := ConfigUpdater.Update(resources)
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 
 		for _, c := range FRRContainers {
 			err := frrcontainer.PairWithNodes(cs, c, pairingFamily, func(container *frrcontainer.FRR) {
 				container.NeighborConfig.BFDEnabled = true
 			})
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 		}
 
 		for _, c := range FRRContainers {
@@ -424,12 +457,10 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 		}
 
 		ginkgo.By("checking metrics")
-		controllerPod, err := metallb.ControllerPod(cs)
-		framework.ExpectNoError(err)
 		speakerPods, err := metallb.SpeakerPods(cs)
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 		promPod, err := metrics.PrometheusPod(cs, PrometheusNamespace)
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 
 		selectors := labelsForPeers(FRRContainers, pairingFamily)
 
@@ -437,13 +468,18 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 			ginkgo.By(fmt.Sprintf("checking speaker %s", speaker.Name))
 
 			Eventually(func() error {
-				speakerMetrics, err := metrics.ForPod(controllerPod, speaker, metallb.Namespace)
+				metricsPod, metricsPrefix, err := FRRProvider.BGPMetricsPodFor(speaker.Namespace, speaker.Name)
+				if err != nil {
+					return err
+				}
+
+				speakerMetrics, err := metrics.ForPod(promPod, metricsPod, metallb.Namespace)
 				if err != nil {
 					return err
 				}
 
 				for _, selector := range selectors {
-					err = metrics.ValidateGaugeValue(1, "metallb_bfd_session_up", selector.labelsBFD, speakerMetrics)
+					err = metrics.ValidateGaugeValue(1, fmt.Sprintf("%s_bfd_session_up", metricsPrefix), selector.labelsBFD, speakerMetrics)
 					if err != nil {
 						return err
 					}
@@ -452,7 +488,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						return err
 					}
 
-					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), "metallb_bfd_control_packet_input", selector.labelsBFD, speakerMetrics)
+					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), fmt.Sprintf("%s_bfd_control_packet_input", metricsPrefix), selector.labelsBFD, speakerMetrics)
 					if err != nil {
 						return err
 					}
@@ -461,7 +497,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						return err
 					}
 
-					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), "metallb_bfd_control_packet_output", selector.labelsBFD, speakerMetrics)
+					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), fmt.Sprintf("%s_bfd_control_packet_output", metricsPrefix), selector.labelsBFD, speakerMetrics)
 					if err != nil {
 						return err
 					}
@@ -470,7 +506,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						return err
 					}
 
-					err = metrics.ValidateGaugeValueCompare(metrics.GreaterOrEqualThan(0), "metallb_bfd_session_down_events", selector.labelsBFD, speakerMetrics)
+					err = metrics.ValidateGaugeValueCompare(metrics.GreaterOrEqualThan(0), fmt.Sprintf("%s_bfd_session_down_events", metricsPrefix), selector.labelsBFD, speakerMetrics)
 					if err != nil {
 						return err
 					}
@@ -479,7 +515,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						return err
 					}
 
-					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), "metallb_bfd_session_up_events", selector.labelsBFD, speakerMetrics)
+					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), fmt.Sprintf("%s_bfd_session_up_events", metricsPrefix), selector.labelsBFD, speakerMetrics)
 					if err != nil {
 						return err
 					}
@@ -488,7 +524,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						return err
 					}
 
-					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), "metallb_bfd_zebra_notifications", selector.labelsBFD, speakerMetrics)
+					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), fmt.Sprintf("%s_bfd_zebra_notifications", metricsPrefix), selector.labelsBFD, speakerMetrics)
 					if err != nil {
 						return err
 					}
@@ -502,7 +538,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						if selector.noEcho {
 							echoVal = 0
 						}
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(echoVal), "metallb_bfd_echo_packet_input", selector.labelsBFD, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(echoVal), fmt.Sprintf("%s_bfd_echo_packet_input", metricsPrefix), selector.labelsBFD, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -511,7 +547,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 							return err
 						}
 
-						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(echoVal), "metallb_bfd_echo_packet_output", selector.labelsBFD, speakerMetrics)
+						err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(echoVal), fmt.Sprintf("%s_bfd_echo_packet_output", metricsPrefix), selector.labelsBFD, speakerMetrics)
 						if err != nil {
 							return err
 						}
@@ -522,7 +558,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 					}
 				}
 				return nil
-			}, time.Minute, 5*time.Second).Should(BeNil())
+			}, time.Minute, 5*time.Second).ShouldNot(HaveOccurred())
 		}
 
 		ginkgo.By("disabling BFD in external FRR containers")
@@ -530,7 +566,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 			err := frrcontainer.PairWithNodes(cs, c, pairingFamily, func(container *frrcontainer.FRR) {
 				container.NeighborConfig.BFDEnabled = false
 			})
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 		}
 
 		ginkgo.By("validating session down metrics")
@@ -538,13 +574,18 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 			ginkgo.By(fmt.Sprintf("checking speaker %s", speaker.Name))
 
 			Eventually(func() error {
-				speakerMetrics, err := metrics.ForPod(controllerPod, speaker, metallb.Namespace)
+				metricsPod, metricsPrefix, err := FRRProvider.BGPMetricsPodFor(speaker.Namespace, speaker.Name)
+				if err != nil {
+					return err
+				}
+
+				speakerMetrics, err := metrics.ForPod(promPod, metricsPod, metallb.Namespace)
 				if err != nil {
 					return err
 				}
 
 				for _, selector := range selectors {
-					err = metrics.ValidateGaugeValue(0, "metallb_bfd_session_up", selector.labelsBFD, speakerMetrics)
+					err = metrics.ValidateGaugeValue(0, fmt.Sprintf("%s_bfd_session_up", metricsPrefix), selector.labelsBFD, speakerMetrics)
 					if err != nil {
 						return err
 					}
@@ -553,7 +594,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 						return err
 					}
 
-					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), "metallb_bfd_session_down_events", selector.labelsBFD, speakerMetrics)
+					err = metrics.ValidateCounterValue(metrics.GreaterOrEqualThan(1), fmt.Sprintf("%s_bfd_session_down_events", metricsPrefix), selector.labelsBFD, speakerMetrics)
 					if err != nil {
 						return err
 					}
@@ -563,7 +604,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 					}
 				}
 				return nil
-			}, 2*time.Minute, 5*time.Second).Should(BeNil())
+			}, 2*time.Minute, 5*time.Second).ShouldNot(HaveOccurred())
 		}
 	},
 		ginkgo.Entry("IPV4 - default",
@@ -578,12 +619,12 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 					Name: "echo",
 				},
 				Spec: metallbv1beta1.BFDProfileSpec{
-					ReceiveInterval:  pointer.Uint32Ptr(80),
-					TransmitInterval: pointer.Uint32Ptr(81),
-					EchoInterval:     pointer.Uint32Ptr(82),
-					EchoMode:         pointer.BoolPtr(true),
-					PassiveMode:      pointer.BoolPtr(false),
-					MinimumTTL:       pointer.Uint32Ptr(254),
+					ReceiveInterval:  ptr.To(uint32(80)),
+					TransmitInterval: ptr.To(uint32(81)),
+					EchoInterval:     ptr.To(uint32(82)),
+					EchoMode:         ptr.To(true),
+					PassiveMode:      ptr.To(false),
+					MinimumTTL:       ptr.To(uint32(254)),
 				},
 			}, ipfamily.IPv4, []string{v4PoolAddresses}),
 		ginkgo.Entry("IPV6 - default",
@@ -598,22 +639,22 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 					Name: "full1",
 				},
 				Spec: metallbv1beta1.BFDProfileSpec{
-					ReceiveInterval:  pointer.Uint32Ptr(60),
-					TransmitInterval: pointer.Uint32Ptr(61),
-					EchoInterval:     pointer.Uint32Ptr(62),
-					EchoMode:         pointer.BoolPtr(false),
-					PassiveMode:      pointer.BoolPtr(false),
-					MinimumTTL:       pointer.Uint32Ptr(254),
+					ReceiveInterval:  ptr.To(uint32(60)),
+					TransmitInterval: ptr.To(uint32(61)),
+					EchoInterval:     ptr.To(uint32(62)),
+					EchoMode:         ptr.To(false),
+					PassiveMode:      ptr.To(false),
+					MinimumTTL:       ptr.To(uint32(254)),
 				},
 			}, ipfamily.DualStack, []string{v4PoolAddresses, v6PoolAddresses}),
 	)
 
 	ginkgo.It("FRR metrics related to config should be exposed", func() {
 		controllerPod, err := metallb.ControllerPod(cs)
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 
 		speakers, err := metallb.SpeakerPods(cs)
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 		allPods := append(speakers, controllerPod)
 
 		bfdProfile := metallbv1beta1.BFDProfile{
@@ -624,7 +665,7 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 
 		ginkgo.By("Creating an invalid configuration")
 
-		resources := metallbconfig.ClusterResources{
+		resources := config.Resources{
 			Pools: []metallbv1beta1.IPAddressPool{
 				{
 					ObjectMeta: metav1.ObjectMeta{
@@ -639,17 +680,17 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 			BGPAdvs: []metallbv1beta1.BGPAdvertisement{emptyBGPAdvertisement},
 		}
 		err = ConfigUpdater.Update(resources)
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 
 		promPod, err := metrics.PrometheusPod(cs, PrometheusNamespace)
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 
 		ginkgo.By("Checking the config stale metric on the speakers")
 		for _, pod := range speakers {
 			ginkgo.By(fmt.Sprintf("checking pod %s", pod.Name))
 			Eventually(func() error {
-				podMetrics, err := metrics.ForPod(controllerPod, pod, metallb.Namespace)
-				framework.ExpectNoError(err)
+				podMetrics, err := metrics.ForPod(promPod, pod, metallb.Namespace)
+				Expect(err).NotTo(HaveOccurred())
 				err = metrics.ValidateGaugeValue(1, "metallb_k8s_client_config_stale_bool", map[string]string{}, podMetrics)
 				if err != nil {
 					return err
@@ -664,12 +705,12 @@ var _ = ginkgo.Describe("BGP metrics", func() {
 
 		resources.BFDProfiles = []metallbv1beta1.BFDProfile{bfdProfile}
 		err = ConfigUpdater.Update(resources)
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 		for _, pod := range allPods {
 			ginkgo.By(fmt.Sprintf("checking pod %s", pod.Name))
 			Eventually(func() error {
-				podMetrics, err := metrics.ForPod(controllerPod, pod, metallb.Namespace)
-				framework.ExpectNoError(err)
+				podMetrics, err := metrics.ForPod(promPod, pod, metallb.Namespace)
+				Expect(err).NotTo(HaveOccurred())
 				err = metrics.ValidateGaugeValue(0, "metallb_k8s_client_config_stale_bool", map[string]string{}, podMetrics)
 				if err != nil {
 					return err
@@ -717,6 +758,9 @@ func labelsForPeers(peers []*frrcontainer.FRR, ipFamily ipfamily.Family) []peerP
 			address = c.Ipv6
 		}
 		peerAddr := address + fmt.Sprintf(":%d", c.RouterConfig.BGPPort)
+		if FRRProvider != nil && FRRProvider.FRRK8sBased() {
+			peerAddr = address
+		}
 
 		// Note: we deliberately don't add the vrf label in case of the default vrf to validate that
 		// it is still possible to list the metrics using only the peer label, which is what most users

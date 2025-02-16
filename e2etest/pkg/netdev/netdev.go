@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/pkg/errors"
-	"go.universe.tf/metallb/e2etest/pkg/executor"
+	"errors"
+
+	"go.universe.tf/e2etest/pkg/executor"
 )
 
 type interfaceAddress struct {
@@ -71,11 +72,11 @@ func CreateVRF(exec executor.Executor, vrfName, routingTable string) error {
 
 	out, err := exec.Exec("ip", "link", "add", vrfName, "type", "vrf", "table", routingTable)
 	if err != nil {
-		return errors.Wrapf(err, "failed to create vrf %s : %s", vrfName, out)
+		return errors.Join(err, fmt.Errorf("failed to create vrf %s : %s", vrfName, out))
 	}
 	out, err = exec.Exec("ip", "link", "set", "dev", vrfName, "up")
 	if err != nil {
-		return errors.Wrapf(err, "failed to set vrf %s up : %s", vrfName, out)
+		return errors.Join(err, fmt.Errorf("failed to set vrf %s up : %s", vrfName, out))
 	}
 	return nil
 }
@@ -98,12 +99,12 @@ func AddToVRF(exec executor.Executor, intf, vrf, ipv6Address string) error {
 	}
 	out, err := exec.Exec("ip", "link", "set", "dev", intf, "master", vrf)
 	if err != nil {
-		return errors.Wrapf(err, "failed to set master %s to %s : %s", vrf, intf, out)
+		return errors.Join(err, fmt.Errorf("failed to set master %s to %s : %s", vrf, intf, out))
 	}
 	// we need this because moving the interface to the vrf removes the v6 IP
 	out, err = exec.Exec("ip", "-6", "addr", "add", ipv6Address+"/64", "dev", intf)
 	if err != nil {
-		return errors.Wrapf(err, "failed to add %s to %s : %s", ipv6Address, intf, out)
+		return errors.Join(err, fmt.Errorf("failed to add %s to %s : %s", ipv6Address, intf, out))
 	}
 	return nil
 }
@@ -163,6 +164,27 @@ func AddressesForDevice(exec executor.Executor, dev string) (*Addresses, error) 
 	}
 
 	return &res, nil
+}
+
+func LinkLocalAddressForDevice(exec executor.Executor, dev string) (string, error) {
+	jsonIPOutput, err := exec.Exec("ip", "-j", "-6", "addr", "show", "dev", dev, "scope", "link")
+	if err != nil {
+		return "", fmt.Errorf("failed to retrieve interface address %s, %w :%s", dev, err, jsonIPOutput)
+	}
+
+	var intf []interfaceAddress
+	err = json.Unmarshal([]byte(jsonIPOutput), &intf)
+	if err != nil {
+		return "", err
+	}
+	if len(intf) != 1 {
+		return "", fmt.Errorf("expected one single interface for %s, got %d", dev, len(intf))
+	}
+	for _, addr := range intf[0].AddrInfo {
+		return addr.Local, nil
+	}
+
+	return "", nil
 }
 
 func findInterfaceWithAddresses(jsonIPOutput string, ipv4Address, ipv6Address string) (string, error) {
